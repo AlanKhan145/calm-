@@ -17,33 +17,32 @@ OPENAI_DEFAULT_MODEL = "gpt-4o"
 
 
 def get_llm(
+    openrouter_key: str | None = None,
+    openai_api_key: str | None = None,
     model: str | None = None,
     temperature: float = 0.0,
     **kwargs: Any,
 ):
     """
-    Create LLM instance. Uses OPENROUTER_API_KEY if set, else OPENAI_API_KEY.
+    Create LLM instance. Ưu tiên key truyền trực tiếp, sau đó env.
 
-    With OpenRouter:
-        - Set OPENROUTER_API_KEY
-        - model format: "openai/gpt-4o", "anthropic/claude-3.5-sonnet", etc.
-
-    With OpenAI:
-        - Set OPENAI_API_KEY
-        - model format: "gpt-4o", "gpt-4", etc.
+    OpenRouter: get_llm(openrouter_key="sk-or-...", model="openai/gpt-4o-mini")
+    OpenAI: get_llm(openai_api_key="sk-...", model="gpt-4o")
 
     Args:
-        model: Model ID. If None, uses OPENROUTER_DEFAULT_MODEL or OPENAI_DEFAULT_MODEL.
+        openrouter_key: OpenRouter API key (hoặc dùng env OPENROUTER_API_KEY).
+        openai_api_key: OpenAI API key (hoặc dùng env OPENAI_API_KEY).
+        model: Model ID. OpenRouter: "openai/gpt-4o-mini", OpenAI: "gpt-4o".
         temperature: Sampling temperature.
         **kwargs: Extra args passed to ChatOpenAI.
 
     Returns:
-        ChatOpenAI instance configured for OpenRouter or OpenAI.
+        ChatOpenAI instance.
     """
     from langchain_openai import ChatOpenAI
 
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY")
+    openrouter_key = openrouter_key or os.environ.get("OPENROUTER_API_KEY")
+    openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
 
     if openrouter_key:
         return ChatOpenAI(

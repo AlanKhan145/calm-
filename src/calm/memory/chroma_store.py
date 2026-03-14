@@ -25,8 +25,11 @@ class ChromaMemoryStore:
         embedding_model: str = "text-embedding-3-small",
         k: int = 3,
         similarity_threshold: float = 0.65,
+        use_openai_embeddings: bool = False,
     ) -> None:
-        """Initialize with collection name, persist path, and retrieval params."""
+        """Initialize with collection name, persist path, and retrieval params.
+        Mặc định use_openai_embeddings=False — dùng HuggingFace (không cần API key).
+        """
         self.collection_name = collection_name
         self.persist_directory = str(
             Path(persist_directory).expanduser().resolve()
@@ -34,39 +37,42 @@ class ChromaMemoryStore:
         self.embedding_model = embedding_model
         self.k = k
         self.similarity_threshold = similarity_threshold
+        self.use_openai_embeddings = use_openai_embeddings
         self._client = None
         self._collection = None
 
     def _get_collection(self):
-        """Lazy init to avoid import at module load."""
+        """Lazy init. Mặc định HuggingFace (không API key). Set use_openai_embeddings=True + OPENAI_API_KEY để dùng OpenAI."""
         if self._collection is not None:
             return self._collection
-        try:
-            from langchain_chroma import Chroma
-            from langchain_openai import OpenAIEmbeddings
+        import os
 
-            embeddings = OpenAIEmbeddings(model=self.embedding_model)
-            self._collection = Chroma(
-                collection_name=self.collection_name,
-                embedding_function=embeddings,
-                persist_directory=self.persist_directory,
-            )
-            return self._collection
-        except ImportError:
-            logger.warning(
-                "langchain-chroma or langchain-openai not available. "
-                "Using in-memory fallback."
-            )
+        from langchain_chroma import Chroma
+
+        use_openai = (
+            self.use_openai_embeddings and bool(os.environ.get("OPENAI_API_KEY"))
+        )
+        if use_openai:
+            try:
+                from langchain_openai import OpenAIEmbeddings
+
+                embeddings = OpenAIEmbeddings(model=self.embedding_model)
+            except Exception as e:
+                logger.warning("OpenAIEmbeddings failed (%s), using HuggingFace", e)
+                use_openai = False
+        if not use_openai:
             from langchain_community.embeddings import HuggingFaceEmbeddings
-            from langchain_community.vectorstores import Chroma
 
-            embeddings = HuggingFaceEmbeddings()
-            self._collection = Chroma(
-                collection_name=self.collection_name,
-                embedding_function=embeddings,
-                persist_directory=self.persist_directory,
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
-            return self._collection
+
+        self._collection = Chroma(
+            collection_name=self.collection_name,
+            embedding_function=embeddings,
+            persist_directory=self.persist_directory,
+        )
+        return self._collection
 
     def add_texts(
         self,

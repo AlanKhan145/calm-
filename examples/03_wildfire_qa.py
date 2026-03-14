@@ -10,10 +10,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from langchain_openai import ChatOpenAI
-
 from calm.agents.data_knowledge_agent import DataKnowledgeAgent
 from calm.agents.qa_agent import WildfireQAAgent
+from calm.llm_factory import get_llm
 from calm.memory.chroma_store import ChromaMemoryStore
 from calm.tools.safety_check import SafetyChecker
 from calm.tools.web_search import WebSearchTool
@@ -21,7 +20,7 @@ from calm.tools.web_search import WebSearchTool
 
 def main() -> None:
     """Run QA agent on wildfire question."""
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+    llm = get_llm()
     safety = SafetyChecker(llm=llm)
     web = WebSearchTool(safety_checker=safety, config={"max_news_results": 5})
     memory = ChromaMemoryStore(

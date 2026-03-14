@@ -10,15 +10,14 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from langchain_openai import ChatOpenAI
-
 from calm.agents.rsen_module import RSENModule
+from calm.llm_factory import get_llm
 from calm.memory.chroma_store import ChromaMemoryStore
 
 
 def main() -> None:
     """Run RSEN validation on prediction with met and spatial data."""
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+    llm = get_llm()
     memory = ChromaMemoryStore(
         collection_name="calm_rsen_memory",
         persist_directory=".chroma",

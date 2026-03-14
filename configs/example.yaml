@@ -1,6 +1,8 @@
 llm_config:
+  # OpenAI: gpt-4o | OpenRouter: openai/gpt-4o, anthropic/claude-3.5-sonnet
   model: openai:gpt-4o
   temperature: 0.0
+  # Use OPENROUTER_API_KEY for OpenRouter, or OPENAI_API_KEY for OpenAI
 
 agent_config:
   planning:

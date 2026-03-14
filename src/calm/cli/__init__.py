@@ -18,6 +18,12 @@ def main() -> None:
 @app.command()
 def plan(
     query: str = typer.Argument(..., help="Wildfire monitoring query"),
+    model: str = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="Model ID (e.g. gpt-4o, openai/gpt-4o for OpenRouter)",
+    ),
 ) -> None:
     """Run planning agent on a query."""
     from rich.console import Console
@@ -25,11 +31,10 @@ def plan(
 
     console = Console()
     try:
-        from langchain_openai import ChatOpenAI
-
         from calm.agents.planning_agent import PlanningAgent
+        from calm.llm_factory import get_llm
 
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+        llm = get_llm(model=model)
         agent = PlanningAgent(llm=llm, config={})
         result = agent.invoke(query)
         plan_steps = result.get("final_output") or []

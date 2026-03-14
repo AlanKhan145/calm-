@@ -10,15 +10,14 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from langchain_openai import ChatOpenAI
-
 from calm.agents.evaluator_agent import EvaluatorAgent
 from calm.agents.planning_agent import PlanningAgent
+from calm.llm_factory import get_llm
 
 
 def main() -> None:
     """Run full pipeline: plan, then evaluate."""
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+    llm = get_llm()
     planner = PlanningAgent(llm=llm, config={})
     evaluator = EvaluatorAgent(
         llm=llm,

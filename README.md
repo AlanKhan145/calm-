@@ -95,7 +95,7 @@ Mạng chuyên gia song song, **cách ly** (mỗi chuyên gia độc lập):
 ## Yêu cầu hệ thống
 
 - **Python:** >= 3.10
-- **LLM:** OpenAI API (gpt-4o) hoặc Ollama (local)
+- **LLM:** OpenAI API, OpenRouter API, hoặc Ollama (local)
 - **Tuỳ chọn:**
   - Google Earth Engine: `GEE_PROJECT_ID`
   - Copernicus CDS: `COPERNICUS_API_KEY`
@@ -120,13 +120,20 @@ pip install -e ".[dev]"
 ### 2. Biến môi trường
 
 ```bash
-# Bắt buộc (hoặc dùng Ollama)
+# Chọn một trong hai:
+
+# OpenRouter (hỗ trợ nhiều model: GPT, Claude, Gemini, v.v.)
+export OPENROUTER_API_KEY="sk-or-v1-..."
+
+# Hoặc OpenAI trực tiếp
 export OPENAI_API_KEY="sk-..."
 
 # Tuỳ chọn
 export GEE_PROJECT_ID="your-gee-project"
 export COPERNICUS_API_KEY="your-cds-api-key"
 ```
+
+**OpenRouter:** Ưu tiên nếu có `OPENROUTER_API_KEY`. Model format: `openai/gpt-4o`, `anthropic/claude-3.5-sonnet`, `google/gemini-pro`, v.v.
 
 ### 3. Xác thực Earth Engine (nếu dùng GEE)
 
@@ -202,6 +209,9 @@ agent_config:
 # Chạy Planning Agent
 calm plan "Wildfire risk assessment for Amazon region next 7 days"
 
+# Chỉ định model (OpenRouter)
+calm plan "Wildfire risk California 14 days" --model anthropic/claude-3.5-sonnet
+
 # Hiển thị phiên bản
 calm version
 ```
@@ -212,9 +222,10 @@ calm version
 
 ```python
 from calm.agents.planning_agent import PlanningAgent
-from langchain_openai import ChatOpenAI
+from calm.llm_factory import get_llm
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+llm = get_llm()  # Dùng OPENROUTER_API_KEY hoặc OPENAI_API_KEY
+# llm = get_llm(model="anthropic/claude-3.5-sonnet")  # Chỉ định model (OpenRouter)
 agent = PlanningAgent(llm=llm, config={}, n_max=3, f_max=3)
 result = agent.invoke("Wildfire risk California 14 days")
 
@@ -226,10 +237,10 @@ print(plan_steps)
 
 ```python
 from calm.agents.rsen_module import RSENModule
+from calm.llm_factory import get_llm
 from calm.memory.chroma_store import ChromaMemoryStore
-from langchain_openai import ChatOpenAI
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+llm = get_llm()
 memory = ChromaMemoryStore(
     collection_name="calm_rsen_memory",
     persist_directory=".chroma",
@@ -254,9 +265,9 @@ from calm.agents.qa_agent import WildfireQAAgent
 from calm.memory.chroma_store import ChromaMemoryStore
 from calm.tools.safety_check import SafetyChecker
 from calm.tools.web_search import WebSearchTool
-from langchain_openai import ChatOpenAI
+from calm.llm_factory import get_llm
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+llm = get_llm()
 safety = SafetyChecker(llm=llm)
 web = WebSearchTool(safety_checker=safety, config={"max_news_results": 5})
 memory = ChromaMemoryStore(collection_name="calm_qa_memory", persist_directory=".chroma", k=3)
@@ -280,9 +291,9 @@ print(result["final_output"])
 ```python
 from calm.agents.evaluator_agent import EvaluatorAgent
 from calm.agents.planning_agent import PlanningAgent
-from langchain_openai import ChatOpenAI
+from calm.llm_factory import get_llm
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+llm = get_llm()
 planner = PlanningAgent(llm=llm, config={})
 evaluator = EvaluatorAgent(llm=llm, config={"passing_score": 75.0})
 

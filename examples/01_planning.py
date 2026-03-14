@@ -10,14 +10,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from langchain_openai import ChatOpenAI
-
 from calm.agents.planning_agent import PlanningAgent
+from calm.llm_factory import get_llm
 
 
 def main() -> None:
     """Run planning agent on wildfire query."""
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+    llm = get_llm()
     agent = PlanningAgent(llm=llm, config={}, n_max=3, f_max=3)
     query = "Wildfire risk assessment for Amazon region next 7 days"
     result = agent.invoke(query)

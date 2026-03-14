@@ -1,0 +1,55 @@
+llm_config:
+  model: openai:gpt-4o
+  temperature: 0.0
+
+agent_config:
+  planning:
+    n_max: 3
+    f_max: 3
+    llm_model: openai:gpt-4o
+
+  data_knowledge:
+    gee_project: ${GEE_PROJECT_ID}
+    cds_api_key: ${COPERNICUS_API_KEY}
+    cache_dir: .cache/wildfire_data
+    dedup_check: true
+    max_news_results: 10
+    max_arxiv_papers: 3
+
+  prediction:
+    model: firecastnet
+    checkpoint: checkpoints/firecastnet_seasfire.pt
+    device: cuda
+    seasfire_resolution: 0.25
+    seasfire_variables: 59
+
+  rsen:
+    memory_collection: calm_rsen_memory
+    memory_k: 3
+    parallel_execution: true
+    llm_model: openai:gpt-4o
+
+  qa:
+    n_max: 3
+    memory_collection: calm_qa_memory
+    evidence_threshold: 0.65
+    max_search_iterations: 3
+    llm_model: openai:gpt-4o
+
+  evaluator:
+    criteria:
+      - data_accuracy
+      - explainability
+      - jargon_avoidance
+      - redundancy_avoidance
+      - citation_quality
+    passing_score: 75.0
+
+  memory:
+    type: chroma
+    persist_directory: .chroma
+    embedding_model: text-embedding-3-small
+    collections:
+      rsen: calm_rsen_memory
+      qa: calm_qa_memory
+      plan: calm_plan_memory

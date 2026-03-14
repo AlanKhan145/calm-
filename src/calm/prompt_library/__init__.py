@@ -1,0 +1,40 @@
+"""
+File: __init__.py
+Description: CALM prompt library — prompts from paper Appendix A Tables A.1–A.8.
+Author: CALM Team
+Created: 2026-03-13
+"""
+
+from calm.prompt_library.data_prompts import (
+    DATA_RETRIEVAL_SYSTEM_PROMPT,
+    KNOWLEDGE_EXTRACTION_PROMPT,
+)
+from calm.prompt_library.planning_prompts import (
+    PLANNER_SYSTEM_PROMPT,
+    PLANNER_REFLECTION_PROMPT,
+    PLANNER_FORMALIZE_PROMPT,
+)
+from calm.prompt_library.rsen_prompts import (
+    WEATHER_ANALYST_SYSTEM_PROMPT,
+    GEO_ANALYST_SYSTEM_PROMPT,
+    OPS_COORDINATOR_SYSTEM_PROMPT,
+)
+from calm.prompt_library.qa_prompts import (
+    QA_SYSTEM_PROMPT,
+    QA_SELF_REFLECTION_SYSTEM_PROMPT,
+    EVIDENCE_EVALUATOR_SYSTEM_PROMPT,
+)
+
+__all__ = [
+    "PLANNER_SYSTEM_PROMPT",
+    "PLANNER_REFLECTION_PROMPT",
+    "PLANNER_FORMALIZE_PROMPT",
+    "WEATHER_ANALYST_SYSTEM_PROMPT",
+    "GEO_ANALYST_SYSTEM_PROMPT",
+    "OPS_COORDINATOR_SYSTEM_PROMPT",
+    "QA_SYSTEM_PROMPT",
+    "QA_SELF_REFLECTION_SYSTEM_PROMPT",
+    "EVIDENCE_EVALUATOR_SYSTEM_PROMPT",
+    "DATA_RETRIEVAL_SYSTEM_PROMPT",
+    "KNOWLEDGE_EXTRACTION_PROMPT",
+]

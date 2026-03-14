@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "calm"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain>=0.3",
+    "langgraph>=0.2",
+    "langchain-openai",
+    "langchain-ollama",
+    "langchain-community",
+    "langchain-chroma",
+    "langchain-text-splitters",
+    "mcp",
+    "fastmcp",
+    "langchain-mcp-adapters",
+    "earthengine-api",
+    "cdsapi",
+    "duckduckgo-search",
+    "arxiv",
+    "beautifulsoup4",
+    "trafilatura",
+    "pymupdf",
+    "pypdf",
+    "numpy",
+    "pandas",
+    "xarray",
+    "rasterio",
+    "pyproj",
+    "pillow",
+    "torch",
+    "torchvision",
+    "scikit-learn",
+    "chromadb",
+    "typer",
+    "rich",
+    "pyyaml",
+    "jsonargparse",
+]
+
+[project.scripts]
+calm = "calm.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "mypy"]
+otel = ["opentelemetry-sdk", "opentelemetry-api"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/calm"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/calm", "configs", "examples", "tests"]

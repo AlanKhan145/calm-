@@ -1,7 +1,7 @@
 """
 File: llm_factory.py
-Description: LLM factory — creates ChatOpenAI with OpenAI or OpenRouter.
-             Uses OPENROUTER_API_KEY if set, else OPENAI_API_KEY.
+Description: LLM factory — creates ChatOpenRouter or ChatOpenAI.
+             Uses OPENROUTER_API_KEY for OpenRouter, OPENAI_API_KEY for OpenAI.
 Author: CALM Team
 Created: 2026-03-13
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o"
 OPENAI_DEFAULT_MODEL = "gpt-4o"
 
@@ -34,30 +33,38 @@ def get_llm(
         openai_api_key: OpenAI API key (hoặc dùng env OPENAI_API_KEY).
         model: Model ID. OpenRouter: "openai/gpt-4o-mini", OpenAI: "gpt-4o".
         temperature: Sampling temperature.
-        **kwargs: Extra args passed to ChatOpenAI.
+        **kwargs: Extra args passed to ChatOpenRouter/ChatOpenAI.
 
     Returns:
-        ChatOpenAI instance.
+        Chat model instance (ChatOpenRouter hoặc ChatOpenAI).
     """
-    from langchain_openai import ChatOpenAI
-
     openrouter_key = openrouter_key or os.environ.get("OPENROUTER_API_KEY")
     openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
 
+    # Loại bỏ params không dùng bởi API
+    safe_kwargs = {
+        k: v
+        for k, v in kwargs.items()
+        if k not in ("openrouter_key", "openai_api_key")
+    }
+
     if openrouter_key:
-        return ChatOpenAI(
+        from langchain_openrouter import ChatOpenRouter
+
+        return ChatOpenRouter(
             model=model or OPENROUTER_DEFAULT_MODEL,
             temperature=temperature,
-            base_url=OPENROUTER_BASE_URL,
-            openai_api_key=openrouter_key,
-            **kwargs,
+            api_key=openrouter_key,
+            **safe_kwargs,
         )
     if openai_key:
+        from langchain_openai import ChatOpenAI
+
         return ChatOpenAI(
             model=model or OPENAI_DEFAULT_MODEL,
             temperature=temperature,
             openai_api_key=openai_key,
-            **kwargs,
+            **safe_kwargs,
         )
     raise ValueError(
         "No API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY."

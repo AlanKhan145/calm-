@@ -1,0 +1,54 @@
+# CALM — Adaptive Multimodal Wildfire Monitoring
+# Cài đặt: pip install -r requirements.txt
+# Hoặc dùng: pip install -e ".[dev]" (cài package có chỉnh sửa + dev deps)
+
+# Load biến môi trường từ .env (bắt buộc cho demo)
+python-dotenv>=1.0.0
+
+# Core
+langchain>=0.3
+langgraph>=0.2
+langchain-openai
+langchain-openrouter
+langchain-ollama
+langchain-community
+langchain-chroma
+langchain-text-splitters
+
+# Vector store & embedding
+chromadb
+sentence-transformers
+
+# Data sources & tools
+earthengine-api
+cdsapi
+duckduckgo-search
+arxiv
+beautifulsoup4
+trafilatura
+pymupdf
+pypdf
+
+# Khoa học dữ liệu
+numpy
+pandas
+xarray
+rasterio
+pyproj
+pillow
+scikit-learn
+
+# Deep learning (mô hình dự đoán)
+torch
+torchvision
+
+# CLI & config
+typer
+rich
+pyyaml
+jsonargparse
+
+# Optional: MCP (nếu dùng)
+# mcp
+# fastmcp
+# langchain-mcp-adapters

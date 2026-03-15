@@ -1,10 +1,8 @@
 """
-File: evaluator_agent.py
-Description: Evaluator Agent — LLM-as-a-Judge with 5 criteria:
-             Data-Accuracy, Explainability, Jargon-Avoidance,
-             Redundancy-Avoidance, Citation-Quality.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun Evaluator Agent — LLM-as-a-Judge với 5 tiêu chí.
+
+Data-Accuracy, Explainability, Jargon-Avoidance, Redundancy-Avoidance,
+Citation-Quality. Điểm 0–100; passing_score (mặc định 75) để đạt.
 """
 
 from __future__ import annotations

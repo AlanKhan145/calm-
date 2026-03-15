@@ -1,9 +1,8 @@
 """
-File: qa_agent.py
-Description: Wildfire QA Agent — retrieve, evidence evaluate, answer or
-             trigger online search. Evidence Evaluator = anti-hallucination.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun Wildfire QA Agent — truy xuất, đánh giá bằng chứng, trả lời hoặc kích hoạt tìm kiếm.
+
+Evidence Evaluator là cơ chế chống hallucination: chỉ trả lời khi bằng chứng đủ
+theo evidence_threshold; nếu không thì kích hoạt web search rồi lặp.
 """
 
 from __future__ import annotations
@@ -90,7 +89,12 @@ class WildfireQAAgent(BaseCALMAgent):
         try:
             resp = self.llm.invoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)
-            refined = json.loads(content) if "{" in content else {}
+            refined = {}
+            if content and "{" in content:
+                try:
+                    refined = json.loads(content)
+                except json.JSONDecodeError:
+                    pass
             refined_query = refined.get("refined_query", state["query"])
             if self.web_search_tool:
                 results = self.web_search_tool.search(refined_query)

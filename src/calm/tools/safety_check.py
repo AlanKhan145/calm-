@@ -1,9 +1,9 @@
 """
-File: safety_check.py
-Description: Safety check before EVERY tool call — URSA Code Block 2 +
-             CALM wildfire-specific extension.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun kiểm tra an toàn trước mỗi lệnh gọi tool (URSA + mở rộng CALM).
+
+Đánh giá hành động trong bối cảnh giám sát cháy rừng: không cảnh báo khẩn
+chưa xác minh, không xóa/ghi đè dữ liệu vệ tinh, không gọi API thiếu credentials.
+Trả về [YES]/[NO]; [NO] → ném PermissionError.
 """
 
 from __future__ import annotations
@@ -35,14 +35,14 @@ Action: {action}
 
 
 class SafetyChecker:
-    """URSA pattern: check before every tool call. [NO] in response → unsafe."""
+    """Kiểm tra an toàn trước mỗi lệnh tool; phản hồi chứa [NO] thì coi là không an toàn."""
 
     def __init__(self, llm) -> None:
-        """Initialize with LLM for safety evaluation."""
+        """Khởi tạo với LLM dùng để đánh giá an toàn."""
         self.llm = llm
 
     def is_safe(self, action: str) -> bool:
-        """Return True if action is safe, False otherwise."""
+        """Trả về True nếu hành động an toàn, False nếu không."""
         prompt = CALM_SAFETY_PROMPT.format(action=action)
         try:
             resp = self.llm.invoke([HumanMessage(content=prompt)])
@@ -56,7 +56,7 @@ class SafetyChecker:
             return False
 
     def check_or_raise(self, action: str) -> None:
-        """Must be called before EVERY tool execution."""
+        """Bắt buộc gọi trước mỗi lần thực thi tool; ném PermissionError nếu không an toàn."""
         if not self.is_safe(action):
             raise PermissionError(
                 f"[UNSAFE] Safety check blocked: {action}"

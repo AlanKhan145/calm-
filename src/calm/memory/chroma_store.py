@@ -1,9 +1,8 @@
 """
-File: chroma_store.py
-Description: ChromaDB memory store — Reflexion framework (RULE 6).
-             Separate collections, text only, persist_directory required.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun bộ nhớ vector ChromaDB — Reflexion framework (RULE 6).
+
+Lưu trữ văn bản theo collection; mỗi agent có thể dùng collection riêng.
+Bắt buộc persist_directory. Embedding mặc định HuggingFace; tùy chọn OpenAI.
 """
 
 from __future__ import annotations
@@ -16,7 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class ChromaMemoryStore:
-    """ChromaDB-backed memory. Text only. Persist directory required (RULE 6)."""
+    """
+    Bộ nhớ vector dựa trên ChromaDB; chỉ lưu văn bản; bắt buộc persist_directory.
+    """
 
     def __init__(
         self,
@@ -27,8 +28,10 @@ class ChromaMemoryStore:
         similarity_threshold: float = 0.65,
         use_openai_embeddings: bool = False,
     ) -> None:
-        """Initialize with collection name, persist path, and retrieval params.
-        Mặc định use_openai_embeddings=False — dùng HuggingFace (không cần API key).
+        """
+        Khởi tạo với tên collection, thư mục lưu trữ và tham số truy xuất.
+
+        Mặc định use_openai_embeddings=False (dùng HuggingFace, không cần API key).
         """
         self.collection_name = collection_name
         self.persist_directory = str(
@@ -42,7 +45,7 @@ class ChromaMemoryStore:
         self._collection = None
 
     def _get_collection(self):
-        """Lazy init. Mặc định HuggingFace (không API key). Set use_openai_embeddings=True + OPENAI_API_KEY để dùng OpenAI."""
+        """Khởi tạo lazy collection; mặc định HuggingFace; set use_openai_embeddings=True và OPENAI_API_KEY để dùng OpenAI."""
         if self._collection is not None:
             return self._collection
         import os
@@ -79,7 +82,7 @@ class ChromaMemoryStore:
         texts: list[str],
         metadatas: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Store verbal reinforcement text only (no arrays)."""
+        """Lưu danh sách văn bản vào collection (chỉ text, không mảng)."""
         if not texts:
             return
         store = self._get_collection()
@@ -94,7 +97,17 @@ class ChromaMemoryStore:
         k: int | None = None,
         threshold: float | None = None,
     ) -> list[Any]:
-        """Top-k retrieval. Returns empty list when no match (NP-7.6)."""
+        """
+        Truy vấn tương đồng top-k; lọc theo ngưỡng similarity.
+
+        Tham số:
+            query: Câu truy vấn.
+            k: Số kết quả (mặc định self.k).
+            threshold: Ngưỡng điểm (mặc định self.similarity_threshold).
+
+        Trả về:
+            Danh sách tài liệu thỏa ngưỡng; rỗng nếu không có kết quả.
+        """
         store = self._get_collection()
         k = k or self.k
         threshold = (

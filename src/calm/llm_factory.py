@@ -1,9 +1,9 @@
 """
-File: llm_factory.py
-Description: LLM factory — creates ChatOpenRouter or ChatOpenAI.
-             Uses OPENROUTER_API_KEY for OpenRouter, OPENAI_API_KEY for OpenAI.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun factory tạo LLM — ChatOpenRouter hoặc ChatOpenAI.
+
+Ưu tiên OPENROUTER_API_KEY (OpenRouter), nếu không có thì dùng OPENAI_API_KEY.
+Ném ValueError nếu không tìm thấy API key nào. Nên gọi load_env() trước khi
+gọi get_llm() nếu dùng file .env.
 """
 
 from __future__ import annotations
@@ -23,20 +23,20 @@ def get_llm(
     **kwargs: Any,
 ):
     """
-    Create LLM instance. Ưu tiên key truyền trực tiếp, sau đó env.
+    Tạo instance LLM (ChatOpenRouter hoặc ChatOpenAI).
 
-    OpenRouter: get_llm(openrouter_key="sk-or-...", model="openai/gpt-4o-mini")
-    OpenAI: get_llm(openai_api_key="sk-...", model="gpt-4o")
+    Ưu tiên key truyền tham số, sau đó biến môi trường. Ném ValueError nếu
+    không có OPENROUTER_API_KEY cũng không có OPENAI_API_KEY.
 
-    Args:
-        openrouter_key: OpenRouter API key (hoặc dùng env OPENROUTER_API_KEY).
-        openai_api_key: OpenAI API key (hoặc dùng env OPENAI_API_KEY).
-        model: Model ID. OpenRouter: "openai/gpt-4o-mini", OpenAI: "gpt-4o".
-        temperature: Sampling temperature.
-        **kwargs: Extra args passed to ChatOpenRouter/ChatOpenAI.
+    Tham số:
+        openrouter_key: API key OpenRouter (hoặc env OPENROUTER_API_KEY).
+        openai_api_key: API key OpenAI (hoặc env OPENAI_API_KEY).
+        model: ID model (OpenRouter: "openai/gpt-4o-mini", OpenAI: "gpt-4o").
+        temperature: Nhiệt độ sampling.
+        **kwargs: Tham số bổ sung cho ChatOpenRouter/ChatOpenAI.
 
-    Returns:
-        Chat model instance (ChatOpenRouter hoặc ChatOpenAI).
+    Trả về:
+        Instance chat model (ChatOpenRouter hoặc ChatOpenAI).
     """
     openrouter_key = openrouter_key or os.environ.get("OPENROUTER_API_KEY")
     openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY")

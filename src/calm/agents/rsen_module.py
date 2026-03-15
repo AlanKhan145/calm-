@@ -1,9 +1,8 @@
 """
-File: rsen_module.py
-Description: RSEN — Reflexive Structured Experts Network. Parallel isolated
-             weather + geo analysts. Equations 17–22.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun RSEN — Reflexive Structured Experts Network.
+
+Hai chuyên gia chạy song song, độc lập: Weather Analyst (khí tượng), Geo Analyst
+(địa lý). Ops Coordinator tổng hợp báo cáo và đưa ra quyết định Plausible/Implausible.
 """
 
 from __future__ import annotations

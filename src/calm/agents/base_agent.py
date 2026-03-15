@@ -1,9 +1,9 @@
 """
-File: base_agent.py
-Description: Base CALM agent — mirrors URSA 3-node structure
-             (generator→reflector→formalizer) using LangGraph StateGraph.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun agent cơ sở — kiến trúc URSA 3 node.
+
+Áp dụng luồng generator → reflector → formalizer (LangGraph StateGraph).
+Mọi agent CALM kế thừa BaseCALMAgent và triển khai _generator_node,
+_reflector_node, _formalizer_node.
 """
 
 from __future__ import annotations
@@ -12,14 +12,23 @@ import logging
 import operator
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage
 from langgraph.graph import END, StateGraph
 
 logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict):
-    """State for every CALM agent graph (URSA pattern)."""
+    """
+    Trạng thái đồ thị cho mọi agent CALM (chuẩn URSA).
+
+    query: câu truy vấn đầu vào.
+    conversation: lịch sử tin nhắn (accumulator).
+    approved: đã được reflector chấp nhận hay chưa.
+    iteration: số lần reflector đã lặp.
+    final_output: kết quả cuối (dict hoặc list bước).
+    error: thông báo lỗi nếu có.
+    """
 
     query: str
     conversation: Annotated[list[BaseMessage], operator.add]
@@ -31,8 +40,11 @@ class AgentState(TypedDict):
 
 class BaseCALMAgent:
     """
-    Mirrors URSA agent structure exactly.
-    3 mandatory nodes: generator → reflector → formalizer.
+    Agent cơ sở theo đúng kiến trúc URSA.
+
+    Ba node bắt buộc: generator (tạo output) → reflector (phản ánh, [APPROVED])
+    → formalizer (chuyển sang JSON hợp lệ). n_max: số lần tối đa reflector
+    lặp; f_max: số lần tối đa formalizer thử parse JSON.
     """
 
     def __init__(
@@ -42,7 +54,7 @@ class BaseCALMAgent:
         n_max: int = 3,
         f_max: int = 3,
     ) -> None:
-        """Initialize base agent with LLM and config."""
+        """Khởi tạo agent với LLM và cấu hình; dựng đồ thị LangGraph."""
         self.llm = llm
         self.config = config or {}
         self.n_max = n_max
@@ -50,7 +62,7 @@ class BaseCALMAgent:
         self.graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
-        """Build LangGraph with 3 nodes: generator, reflector, formalizer."""
+        """Dựng LangGraph với 3 node: generator → reflector → formalizer."""
         g = StateGraph(AgentState)
         g.add_node("generator", self._generator_node)
         g.add_node("reflector", self._reflector_node)
@@ -66,7 +78,7 @@ class BaseCALMAgent:
         return g.compile()
 
     def _route(self, state: AgentState) -> str:
-        """URSA: [APPROVED] or n_max → formalizer."""
+        """Điều hướng: nếu [APPROVED] hoặc đạt n_max thì sang formalizer."""
         conv = state.get("conversation") or []
         if not conv:
             return "formalizer"
@@ -78,19 +90,19 @@ class BaseCALMAgent:
         return "generator"
 
     def _generator_node(self, state: AgentState) -> dict:
-        """Generate initial response. Override in subclasses."""
+        """Tạo phản hồi ban đầu. Phải override ở lớp con."""
         raise NotImplementedError
 
     def _reflector_node(self, state: AgentState) -> dict:
-        """Critically review output. Override in subclasses."""
+        """Rà soát output và quyết định [APPROVED] hay lặp. Override ở lớp con."""
         raise NotImplementedError
 
     def _formalizer_node(self, state: AgentState) -> dict:
-        """Convert to validated JSON. Override in subclasses."""
+        """Chuyển output sang JSON hợp lệ. Override ở lớp con."""
         raise NotImplementedError
 
     def invoke(self, query: str) -> dict:
-        """Run the agent on a query."""
+        """Chạy agent với câu truy vấn; trả về state cuối (final_output, approved, error)."""
         return self.graph.invoke({
             "query": query,
             "conversation": [],

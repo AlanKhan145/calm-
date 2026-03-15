@@ -1,9 +1,8 @@
 """
-File: execution_agent.py
-Description: Execution agent — URSA Code Block 2 + CALM 4-stage workflow:
-             Task Interpretation, Safety Check, Tool Calling, Summarization.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun Execution Agent — thực thi từng bước kế hoạch.
+
+Luồng: Diễn giải bước → Kiểm tra an toàn → Gọi tool (data_knowledge, prediction,
+web_search) → Trả về kết quả. Không bịa dữ liệu; lỗi trả về {"error": "...", "result": null}.
 """
 
 from __future__ import annotations
@@ -75,7 +74,12 @@ class ExecutionAgent:
             if agent_name == "data_knowledge":
                 tool = self.tools.get("data_knowledge")
                 if tool:
-                    result = tool.retrieve(step.get("query", ""), params)
+                    query_for_retrieve = (
+                        (params.get("query"))
+                        or step.get("query")
+                        or context.get("query", "")
+                    )
+                    result = tool.retrieve(query_for_retrieve, params)
                 else:
                     result = {
                         "error": "data_knowledge tool not available",

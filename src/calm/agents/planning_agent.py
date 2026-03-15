@@ -1,9 +1,8 @@
 """
-File: planning_agent.py
-Description: Planning agent — decompose wildfire query into JSON plan
-             (CALM Table A.1, URSA 3-node structure).
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun Planning Agent — phân rã câu truy vấn cháy rừng thành kế hoạch JSON.
+
+Theo chuẩn URSA 3 node: generator (tạo bước) → reflector (rà soát, [APPROVED])
+→ formalizer (xuất JSON plan_steps). Dùng cho bảng A.1 trong tài liệu CALM.
 """
 
 from __future__ import annotations
@@ -25,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 class PlanningAgent(BaseCALMAgent):
-    """High-level planner: decompose, reflect, formalize into JSON plan."""
+    """Agent lập kế hoạch cấp cao: phân rã query → phản ánh → formalize thành JSON."""
 
     def _generator_node(self, state: AgentState) -> dict[str, Any]:
-        """Generate initial plan from query."""
+        """Tạo kế hoạch ban đầu từ câu truy vấn (bước đầu tiên trong 3 node)."""
         msgs = [
             HumanMessage(
                 content=PLANNER_SYSTEM_PROMPT + "\n\nTask: " + state["query"]
@@ -47,7 +46,7 @@ class PlanningAgent(BaseCALMAgent):
         }
 
     def _reflector_node(self, state: AgentState) -> dict[str, Any]:
-        """Review plan for clarity, completeness, feasibility, safety."""
+        """Rà soát kế hoạch: rõ ràng, đầy đủ, khả thi, an toàn; trả về [APPROVED] nếu ổn."""
         msgs = [
             HumanMessage(
                 content=(
@@ -67,7 +66,7 @@ class PlanningAgent(BaseCALMAgent):
         return {"conversation": [AIMessage(content=content)]}
 
     def _formalizer_node(self, state: AgentState) -> dict[str, Any]:
-        """URSA: f_max retries for valid JSON."""
+        """Chuyển nội dung đã duyệt sang JSON hợp lệ; tối đa f_max lần thử."""
         conv = list(state.get("conversation") or [])
         last_content = ""
         for attempt in range(self.f_max):

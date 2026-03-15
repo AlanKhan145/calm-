@@ -1,17 +1,20 @@
 """
-File: __init__.py
-Description: CALM CLI — typer-based (NP-6.6).
-Author: CALM Team
-Created: 2026-03-13
+CALM CLI — giao diện dòng lệnh dựa trên Typer.
+
+Cung cấp lệnh: calm plan <query>, calm version.
+Nạp biến môi trường từ .env trước khi chạy agent.
 """
 
 import typer
+
+from calm.utils.env_loader import load_env
 
 app = typer.Typer(help="CALM — Adaptive Multimodal Wildfire Monitoring")
 
 
 def main() -> None:
-    """Entry point for calm command."""
+    """Điểm vào lệnh calm: nạp .env rồi chạy Typer."""
+    load_env()
     app()
 
 
@@ -25,7 +28,7 @@ def plan(
         help="Model ID (e.g. gpt-4o, openai/gpt-4o for OpenRouter)",
     ),
 ) -> None:
-    """Run planning agent on a query."""
+    """Chạy Planning Agent với câu truy vấn giám sát cháy rừng."""
     from rich.console import Console
     from rich.panel import Panel
 
@@ -41,8 +44,15 @@ def plan(
         console.print(
             Panel(str(plan_steps), title="Plan", border_style="green")
         )
+    except ValueError as e:
+        console.print(
+            "[red]Lỗi cấu hình: Thiếu OPENAI_API_KEY hoặc OPENROUTER_API_KEY.[/red]"
+        )
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
     except ImportError as e:
         console.print(f"[red]Import error: {e}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()

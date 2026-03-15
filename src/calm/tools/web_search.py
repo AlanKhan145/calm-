@@ -1,8 +1,8 @@
 """
-File: web_search.py
-Description: DuckDuckGo web search (FR-D03). Safety check before every call.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun tìm kiếm web DuckDuckGo (FR-D03).
+
+Mỗi lần gọi search() đều qua SafetyChecker; nếu không an toàn thì ném PermissionError.
+Trả về danh sách dict (title, snippet, url).
 """
 
 from __future__ import annotations

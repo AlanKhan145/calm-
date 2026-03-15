@@ -1,9 +1,8 @@
 """
-File: data_knowledge_agent.py
-Description: Data & Knowledge Management Agent — Collection (FR-D05 dedup),
-             Extraction, Retrieval. Sources: GEE, CDS, DuckDuckGo, ArXiv.
-Author: CALM Team
-Created: 2026-03-13
+Mô-đun Data & Knowledge Management Agent — Thu thập, Trích xuất, Truy xuất.
+
+Nguồn: GEE, Copernicus CDS, DuckDuckGo, ArXiv. FR-D05: kiểm tra trùng lặp (dedup)
+trước khi crawl để tránh thu thập dư thừa.
 """
 
 from __future__ import annotations

@@ -44,7 +44,7 @@
 - **Luồng 3 node (URSA):** Mọi agent đều có **Generator** (tạo output ban đầu) → **Reflector** (phản ánh, chỉnh sửa, quyết định `[APPROVED]` hoặc lặp) → **Formalizer** (chuyển sang JSON hợp lệ, tối đa `f_max` lần thử). Implement bằng **LangGraph** `StateGraph(AgentState)`.
 - **Memory:** ChromaDB với collection riêng cho từng module (`calm_rsen_memory`, `calm_qa_memory`, `calm_plan_memory`), embedding OpenAI `text-embedding-3-small` hoặc HuggingFace `sentence-transformers/all-MiniLM-L6-v2`, top-k retrieval và `similarity_threshold`.
 - **Reasoning:** RSEN gồm Weather Analyst, Geo Analyst (chạy song song, cách ly), Ops Coordinator tổng hợp → Plausible/Implausible.
-- **Agent system:** PlanningAgent, DataKnowledgeAgent, RSENModule, WildfireQAAgent, ExecutionAgent, EvaluatorAgent; mỗi agent có thể dùng LLM khác nhau qua `llm_factory`.
+- **Agent system:** PlanningAgent, DataKnowledgeAgent, RSENModule, WildfireQAAgent, ExecutionAgent, EvaluatorAgent; mỗi agent nhận instance LLM (ChatOpenRouter hoặc ChatOpenAI tạo từ env).
 
 ### Thuật toán chính
 
@@ -54,7 +54,7 @@
 
 ### Mô hình AI sử dụng
 
-- **LLM:** OpenAI (gpt-4o) hoặc OpenRouter (Claude, Gemini, v.v.) qua `get_llm()`; tùy chọn Ollama (local).
+- **LLM:** OpenAI (gpt-4o) hoặc OpenRouter (Claude, Gemini, v.v.) — tạo trực tiếp ChatOpenAI/ChatOpenRouter từ `OPENAI_API_KEY` hoặc `OPENROUTER_API_KEY`; tùy chọn Ollama (local).
 - **Embedding:** `text-embedding-3-small` (OpenAI) hoặc `sentence-transformers/all-MiniLM-L6-v2` (HuggingFace).
 - **Dự đoán cháy:** FireCastNet, LSTM, ConvLSTM, UTAE (stubs trong `models/`), checkpoint ví dụ `firecastnet_seasfire.pt`.
 
@@ -72,7 +72,7 @@
 
 | Thành phần | Mô tả |
 |------------|--------|
-| **LLM interface** | `llm_factory.get_llm()`: ưu tiên OpenRouter nếu có `OPENROUTER_API_KEY`, ngược lại OpenAI; hỗ trợ tham số `model`, `temperature`. |
+| **LLM** | Tạo trực tiếp: ưu tiên `OPENROUTER_API_KEY` → ChatOpenRouter, không có thì `OPENAI_API_KEY` → ChatOpenAI; có thể set `OPENROUTER_MODEL` / `OPENAI_MODEL`. |
 | **Planning agent** | `PlanningAgent(BaseCALMAgent)`: phân rã query thành plan JSON; 3 node generator/reflector/formalizer; `n_max` (số lần reflector lặp), `f_max` (số lần formalizer thử). |
 | **Memory store** | `ChromaMemoryStore`: collection name, `persist_directory`, embedding model, `k`, `similarity_threshold`; `add_texts()`, `similarity_search()`; hỗ trợ OpenAI hoặc HuggingFace embeddings. |
 | **Embedding** | Mặc định HuggingFace `all-MiniLM-L6-v2`; tùy chọn OpenAI `text-embedding-3-small` khi `use_openai_embeddings=True` và có `OPENAI_API_KEY`. |
@@ -236,8 +236,7 @@ calm/
 │   │   └── chroma_store.py    # ChromaMemoryStore — Reflexion, top-k, similarity_threshold
 │   ├── models/                # Mô hình dự đoán (FireCastNet, LSTM, ConvLSTM, UTAE)
 │   ├── cli/                   # Typer CLI: calm plan, calm version
-│   ├── utils/                 # load_env(), get_env() — nạp biến môi trường từ .env
-│   └── llm_factory.py         # get_llm() — OpenRouter / OpenAI / Ollama
+│   └── utils/                 # load_env(), get_env() — nạp biến môi trường từ .env
 ├── main.py                    # Điểm vào demo: python main.py
 ├── calm_demo.ipynb            # Notebook demo theo paper (URSA, RSEN, QA, Evaluator, Execution)
 ├── .env.example               # Mẫu biến môi trường (sao thành .env)
@@ -261,7 +260,7 @@ calm/
 - **agents:** Logic nghiệp vụ chính; mỗi agent kế thừa base 3-node, có thể dùng memory và tools riêng.
 - **memory:** Lưu trữ vector (Chroma), dùng cho reflexion và retrieval theo từng collection.
 - **retrieval:** Thực hiện trong `ChromaMemoryStore.similarity_search()`; embedding trong chroma_store.
-- **llm:** Gọi qua `llm_factory`; không có thư mục riêng, nằm trong từng agent.
+- **LLM:** Tạo ChatOpenRouter hoặc ChatOpenAI từ env tại điểm vào (main, CLI, examples, notebook); agent nhận instance LLM qua tham số.
 - **tools:** Giao tiếp API bên ngoài (GEE, CDS, web, ArXiv); mọi lệnh qua SafetyChecker.
 - **utils:** Có thể mở rộng; hiện tại config đọc qua YAML/jsonargparse.
 
@@ -272,30 +271,43 @@ calm/
 ### Load hệ thống và chạy Planning Agent
 
 ```python
-import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from calm.utils.env_loader import load_env
+load_env()
+
+if os.environ.get("OPENROUTER_API_KEY"):
+    from langchain_openrouter import ChatOpenRouter
+    llm = ChatOpenRouter(model="openai/gpt-4o", api_key=os.environ["OPENROUTER_API_KEY"], temperature=0.0)
+elif os.environ.get("OPENAI_API_KEY"):
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(model="gpt-4o", openai_api_key=os.environ["OPENAI_API_KEY"], temperature=0.0)
+else:
+    raise ValueError("Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env")
 
 from calm.agents.planning_agent import PlanningAgent
-from calm.llm_factory import get_llm
-
-llm = get_llm()  # Dùng OPENROUTER_API_KEY hoặc OPENAI_API_KEY
 agent = PlanningAgent(llm=llm, config={}, n_max=3, f_max=3)
 result = agent.invoke("Wildfire risk assessment for Amazon region next 7 days")
-
-plan_steps = result["final_output"]
-print(plan_steps)
+print(result["final_output"])
 print("Approved:", result["approved"])
 ```
 
 ### RSEN — Xác thực dự đoán
 
 ```python
-from calm.agents.rsen_module import RSENModule
-from calm.llm_factory import get_llm
-from calm.memory.chroma_store import ChromaMemoryStore
+import os
+from calm.utils.env_loader import load_env
+load_env()
+if os.environ.get("OPENROUTER_API_KEY"):
+    from langchain_openrouter import ChatOpenRouter
+    llm = ChatOpenRouter(model="openai/gpt-4o", api_key=os.environ["OPENROUTER_API_KEY"], temperature=0.0)
+elif os.environ.get("OPENAI_API_KEY"):
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(model="gpt-4o", openai_api_key=os.environ["OPENAI_API_KEY"], temperature=0.0)
+else:
+    raise ValueError("Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env")
 
-llm = get_llm()
+from calm.agents.rsen_module import RSENModule
+from calm.memory.chroma_store import ChromaMemoryStore
 memory = ChromaMemoryStore(
     collection_name="calm_rsen_memory",
     persist_directory=".chroma",
@@ -315,14 +327,23 @@ print(result["final_rationale"])
 ### Wildfire QA Agent (có Evidence Evaluator)
 
 ```python
+import os
+from calm.utils.env_loader import load_env
+load_env()
+if os.environ.get("OPENROUTER_API_KEY"):
+    from langchain_openrouter import ChatOpenRouter
+    llm = ChatOpenRouter(model="openai/gpt-4o", api_key=os.environ["OPENROUTER_API_KEY"], temperature=0.0)
+elif os.environ.get("OPENAI_API_KEY"):
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(model="gpt-4o", openai_api_key=os.environ["OPENAI_API_KEY"], temperature=0.0)
+else:
+    raise ValueError("Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env")
+
 from calm.agents.data_knowledge_agent import DataKnowledgeAgent
 from calm.agents.qa_agent import WildfireQAAgent
 from calm.memory.chroma_store import ChromaMemoryStore
 from calm.tools.safety_check import SafetyChecker
 from calm.tools.web_search import WebSearchTool
-from calm.llm_factory import get_llm
-
-llm = get_llm()
 safety = SafetyChecker(llm=llm)
 web = WebSearchTool(safety_checker=safety, config={"max_news_results": 5})
 memory = ChromaMemoryStore(collection_name="calm_qa_memory", persist_directory=".chroma", k=3)
@@ -346,7 +367,7 @@ print(result["final_output"])
 ## 9. Hướng dẫn phát triển (Development Guidelines)
 
 - **Quy ước code:** Tuân thủ kiến trúc URSA (3 node: generator → reflector → formalizer); mỗi agent kế thừa `BaseCALMAgent` và implement `_generator_node`, `_reflector_node`, `_formalizer_node`. Gọi tool luôn qua `SafetyChecker`. Code style: Ruff, type hints (Mypy tùy chọn).
-- **Thiết kế modular:** Agent không phụ thuộc trực tiếp vào LLM cụ thể mà nhận instance từ `get_llm()`; memory nhận interface có `add_texts` và `similarity_search`; config đọc từ YAML (ví dụ `configs/example.yaml`).
+- **Thiết kế modular:** Agent nhận instance LLM (ChatOpenRouter/ChatOpenAI tạo từ env tại điểm vào); memory nhận interface có `add_texts` và `similarity_search`; config đọc từ YAML (ví dụ `configs/example.yaml`).
 - **Đóng góp:** Báo lỗi qua GitHub Issues; cải tiến qua Fork → Branch → Pull Request. Giữ nguyên NFR và safety criteria (không cảnh báo khẩn cấp chưa xác minh, không xóa/ghi đè dữ liệu vệ tinh/checkpoint, không gọi API thiếu credentials, không thực thi shell thay đổi trạng thái hệ thống).
 
 ---

@@ -1,8 +1,8 @@
 """
 Mô-đun nạp biến môi trường từ file .env.
 
-Đảm bảo OPENAI_API_KEY hoặc OPENROUTER_API_KEY được nạp trước khi gọi
-get_llm(). Hỗ trợ .env ở thư mục gốc dự án hoặc thư mục hiện tại.
+Đảm bảo OPENAI_API_KEY hoặc OPENROUTER_API_KEY được nạp trước khi tạo
+ChatOpenRouter/ChatOpenAI. Hỗ trợ .env ở thư mục gốc dự án hoặc thư mục hiện tại.
 """
 
 from __future__ import annotations

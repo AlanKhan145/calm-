@@ -1,8 +1,5 @@
 """
-File: 02_prediction_rsen.py
-Description: Example — RSEN validation: parallel weather + geo analysts.
-Author: CALM Team
-Created: 2026-03-13
+Example — RSEN: xác thực dự đoán với Weather Analyst và Geo Analyst song song.
 """
 
 import os
@@ -10,14 +7,32 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from calm.utils.env_loader import load_env
+load_env()
+
 from calm.agents.rsen_module import RSENModule
-from calm.llm_factory import get_llm
 from calm.memory.chroma_store import ChromaMemoryStore
+
+if os.environ.get("OPENROUTER_API_KEY"):
+    from langchain_openrouter import ChatOpenRouter
+    llm = ChatOpenRouter(
+        model=os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o"),
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        temperature=0.0,
+    )
+elif os.environ.get("OPENAI_API_KEY"):
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(
+        model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+        openai_api_key=os.environ["OPENAI_API_KEY"],
+        temperature=0.0,
+    )
+else:
+    raise ValueError("Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env")
 
 
 def main() -> None:
-    """Run RSEN validation on prediction with met and spatial data."""
-    llm = get_llm()
+    """Chạy RSEN validation với dữ liệu mẫu."""
     memory = ChromaMemoryStore(
         collection_name="calm_rsen_memory",
         persist_directory=".chroma",

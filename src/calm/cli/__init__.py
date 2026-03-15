@@ -29,15 +29,31 @@ def plan(
     ),
 ) -> None:
     """Chạy Planning Agent với câu truy vấn giám sát cháy rừng."""
+    import os
     from rich.console import Console
     from rich.panel import Panel
 
     console = Console()
     try:
         from calm.agents.planning_agent import PlanningAgent
-        from calm.llm_factory import get_llm
 
-        llm = get_llm(model=model)
+        if os.environ.get("OPENROUTER_API_KEY"):
+            from langchain_openrouter import ChatOpenRouter
+            llm = ChatOpenRouter(
+                model=model or os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o"),
+                api_key=os.environ["OPENROUTER_API_KEY"],
+                temperature=0.0,
+            )
+        elif os.environ.get("OPENAI_API_KEY"):
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model or os.environ.get("OPENAI_MODEL", "gpt-4o"),
+                openai_api_key=os.environ["OPENAI_API_KEY"],
+                temperature=0.0,
+            )
+        else:
+            raise ValueError("Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env")
+
         agent = PlanningAgent(llm=llm, config={})
         result = agent.invoke(query)
         plan_steps = result.get("final_output") or []
@@ -45,9 +61,7 @@ def plan(
             Panel(str(plan_steps), title="Plan", border_style="green")
         )
     except ValueError as e:
-        console.print(
-            "[red]Lỗi cấu hình: Thiếu OPENAI_API_KEY hoặc OPENROUTER_API_KEY.[/red]"
-        )
+        console.print("[red]Lỗi cấu hình: Thiếu OPENAI_API_KEY hoặc OPENROUTER_API_KEY.[/red]")
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     except ImportError as e:

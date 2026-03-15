@@ -18,27 +18,41 @@ _src = _root / "src"
 if _src.exists() and str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-# Nạp .env trước khi import calm (get_llm cần API key)
+import os
+
 from calm.utils.env_loader import load_env
 
 load_env(_root / ".env")
 load_env(_root.parent / ".env")
 
 from calm.agents.planning_agent import PlanningAgent
-from calm.llm_factory import get_llm
 
 
 def main() -> None:
     """Chạy demo Planning Agent: phân rã câu hỏi cháy rừng thành kế hoạch JSON."""
     try:
-        llm = get_llm()
-    except ValueError as e:
-        print("Lỗi cấu hình: Thiếu API key. Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong file .env")
+        if os.environ.get("OPENROUTER_API_KEY"):
+            from langchain_openrouter import ChatOpenRouter
+            llm = ChatOpenRouter(
+                model=os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o"),
+                api_key=os.environ["OPENROUTER_API_KEY"],
+                temperature=0.0,
+            )
+        elif os.environ.get("OPENAI_API_KEY"):
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+                openai_api_key=os.environ["OPENAI_API_KEY"],
+                temperature=0.0,
+            )
+        else:
+            raise ValueError("Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env")
+    except ImportError as e:
+        print("Lỗi thiếu thư viện: pip install -e . hoặc pip install -r requirements.txt")
         print("Chi tiết:", e)
         sys.exit(1)
-    except ImportError as e:
-        print("Lỗi thiếu thư viện: Cài đặt dependencies bằng pip install -e . hoặc pip install -r requirements.txt")
-        print("Chi tiết:", e)
+    except ValueError as e:
+        print("Lỗi cấu hình:", e)
         sys.exit(1)
 
     agent = PlanningAgent(llm=llm, config={}, n_max=3, f_max=3)

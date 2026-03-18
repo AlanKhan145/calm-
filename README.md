@@ -89,7 +89,11 @@
 - **Data/Memory:** DataKnowledgeAgent đọc config (GEE, CDS, cache_dir), gọi tools → dữ liệu thô → extract → lưu vào Chroma (collection tương ứng) và cache.
 - **RSEN:** prediction + met_data + spatial_data → từng analyst → Ops Coordinator → decision + rationale; có thể ghi lại vào `calm_rsen_memory`.
 - **QA:** Query → retrieval từ memory → Evidence Evaluator → nếu đủ → LLM trả lời; không đủ → web/ArXiv → lặp tối đa `max_search_iterations`.
-- **Output:** Plan JSON, quyết định RSEN, câu trả lời QA, hoặc bảng điểm Evaluator.
+- **Routing:** `CALMOrchestrator._classify_intent()` đọc `action`/`agent` trong plan steps; fallback sang từ khoá query; mặc định "qa".
+- **Data/Memory:** DataKnowledgeAgent gọi tools → dữ liệu thô → extract tri thức → lưu ChromaDB.
+- **RSEN:** prediction + met_data + spatial_data → hai analyst song song → Ops Coordinator → decision + rationale.
+- **QA:** retrieval từ ChromaDB → Evidence Evaluator → search thêm nếu thiếu bằng chứng → câu trả lời.
+- **Output:** `{"task_type", "plan_steps", "answer"/"risk_level", "decision", "rationale", "error"}`
 
 ---
 
@@ -189,19 +193,23 @@ Tạo file `.env` từ mẫu (xem `.env.example`) và đặt ít nhất một tr
 `OPENAI_API_KEY` hoặc `OPENROUTER_API_KEY`.
 
 ```bash
-# Cách 1: Điểm vào chính (tự nạp .env, chạy Planning Agent)
+# Cách 1: Điểm vào chính — demo hai query auto-routing (QA + Prediction)
 python main.py
 
-# Cách 2: CLI (nạp .env trong calm plan)
+# Cách 2: CLI — tự động định tuyến (QA hoặc Prediction)
+calm run "What causes wildfires in the Amazon?"
+calm run "Predict wildfire risk for California next 7 days"
+
+# Cách 3: CLI — chỉ xem kế hoạch (Planning Agent)
 calm plan "Wildfire risk assessment for Amazon region next 7 days"
 
-# Cách 3: Các script ví dụ (cần pip install -e . trước)
-python examples/01_planning.py
-python examples/02_prediction_rsen.py
-python examples/03_wildfire_qa.py
-python examples/04_full_pipeline.py
+# Cách 4: Các script ví dụ (cần pip install -e . trước)
+python examples/01_planning.py         # Planning Agent
+python examples/02_prediction_rsen.py  # RSEN validation
+python examples/03_wildfire_qa.py      # QA Agent
+python examples/04_full_pipeline.py    # Full pipeline + Evaluator (orchestrator)
 
-# Cách 4: Jupyter notebook (demo đầy đủ theo paper: Planning, RSEN, QA, Pipeline, Execution)
+# Cách 5: Jupyter notebook (demo đầy đủ theo paper: Planning, RSEN, QA, Pipeline)
 jupyter notebook calm_demo.ipynb
 ```
 
@@ -212,41 +220,43 @@ jupyter notebook calm_demo.ipynb
 ```
 calm/
 ├── configs/
-│   └── example.yaml           # Cấu hình mẫu (LLM, planning, data_knowledge, prediction, rsen, qa, evaluator, memory)
+│   └── example.yaml                  # Cấu hình mẫu (LLM, planning, data_knowledge, ...)
 ├── src/calm/
 │   ├── __init__.py
-│   ├── agents/                # Các agent (URSA 3-node)
-│   │   ├── base_agent.py      # BaseCALMAgent, AgentState, StateGraph (generator/reflector/formalizer)
-│   │   ├── planning_agent.py  # PlanningAgent — phân rã query → plan JSON
-│   │   ├── data_knowledge_agent.py  # Thu thập GEE, CDS, Web, ArXiv; collect → extract → retrieve
-│   │   ├── execution_agent.py # Thực thi từng bước kế hoạch
-│   │   ├── rsen_module.py     # RSEN: Weather Analyst, Geo Analyst, Ops Coordinator
+│   ├── orchestrator.py               # ★ CALMOrchestrator — bộ định tuyến trung tâm
+│   ├── agents/                       # Các agent (URSA 3-node)
+│   │   ├── base_agent.py             # BaseCALMAgent, AgentState, StateGraph
+│   │   ├── planning_agent.py         # PlanningAgent — phân rã query → plan JSON
+│   │   ├── data_knowledge_agent.py   # Thu thập GEE, CDS, Web, ArXiv; collect → extract → retrieve
+│   │   ├── execution_agent.py        # Thực thi từng bước; route data_knowledge / prediction / qa / rsen
+│   │   ├── rsen_module.py            # RSEN: Weather Analyst, Geo Analyst, Ops Coordinator (song song)
 │   │   ├── prediction_reasoning_agent.py
-│   │   ├── qa_agent.py        # WildfireQAAgent + Evidence Evaluator
-│   │   └── evaluator_agent.py # LLM-as-a-Judge, 5 tiêu chí
-│   ├── tools/                 # Công cụ với safety check (URSA pattern)
+│   │   ├── qa_agent.py               # WildfireQAAgent + Evidence Evaluator
+│   │   └── evaluator_agent.py        # LLM-as-a-Judge, 5 tiêu chí
+│   ├── tools/                        # Công cụ với safety check
 │   │   ├── earth_engine.py
 │   │   ├── copernicus.py
 │   │   ├── web_search.py
 │   │   ├── arxiv_tool.py
 │   │   ├── safety_check.py
 │   │   └── wildfire_models.py
-│   ├── prompt_library/        # Prompts (planning, rsen, qa, data)
+│   ├── prompt_library/               # Prompts (planning, rsen, qa, data)
 │   ├── memory/
-│   │   └── chroma_store.py    # ChromaMemoryStore — Reflexion, top-k, similarity_threshold
-│   ├── models/                # Mô hình dự đoán (FireCastNet, LSTM, ConvLSTM, UTAE)
-│   ├── cli/                   # Typer CLI: calm plan, calm version
-│   └── utils/                 # load_env(), get_env() — nạp biến môi trường từ .env
-├── main.py                    # Điểm vào demo: python main.py
-├── calm_demo.ipynb            # Notebook demo theo paper (URSA, RSEN, QA, Evaluator, Execution)
-├── .env.example               # Mẫu biến môi trường (sao thành .env)
+│   │   └── chroma_store.py           # ChromaMemoryStore — Reflexion, top-k
+│   ├── models/                       # Mô hình dự đoán (FireCastNet, LSTM, ConvLSTM, UTAE)
+│   ├── cli/                          # Typer CLI: calm run, calm plan, calm version
+│   └── utils/                        # load_env(), get_env()
+├── main.py                           # Demo auto-routing: python main.py
+├── calm_demo.ipynb                   # Notebook demo (URSA, RSEN, QA, Evaluator)
+├── .env.example                      # Mẫu biến môi trường
 ├── examples/
-│   ├── 01_planning.py
-│   ├── 02_prediction_rsen.py
-│   ├── 03_wildfire_qa.py
-│   └── 04_full_pipeline.py
+│   ├── 01_planning.py                # Planning Agent đơn lẻ
+│   ├── 02_prediction_rsen.py         # RSEN validation
+│   ├── 03_wildfire_qa.py             # QA Agent
+│   └── 04_full_pipeline.py           # ★ Full pipeline — orchestrator + evaluator
 ├── tests/
-│   ├── conftest.py            # Fixtures: mock_llm, mock_rsen_plausible, ...
+│   ├── conftest.py                   # Fixtures: mock_llm, mock_rsen_plausible, ...
+│   ├── test_orchestrator.py          # ★ Tests cho CALMOrchestrator (routing, pipelines)
 │   ├── test_planning_agent.py
 │   ├── test_rsen_module.py
 │   ├── test_qa_agent.py
@@ -267,6 +277,40 @@ calm/
 ---
 
 ## 8. Ví dụ sử dụng (Example Usage)
+
+### CALMOrchestrator — auto-routing (điểm vào chính)
+
+```python
+import os
+from calm.utils.env_loader import load_env
+load_env()
+
+if os.environ.get("OPENROUTER_API_KEY"):
+    from langchain_openrouter import ChatOpenRouter
+    llm = ChatOpenRouter(model="openai/gpt-4o", api_key=os.environ["OPENROUTER_API_KEY"], temperature=0.0)
+else:
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(model="gpt-4o", openai_api_key=os.environ["OPENAI_API_KEY"], temperature=0.0)
+
+from calm.memory.chroma_store import ChromaMemoryStore
+from calm.orchestrator import CALMOrchestrator
+
+memory = ChromaMemoryStore(collection_name="calm", persist_directory=".chroma")
+orchestrator = CALMOrchestrator.from_llm(llm=llm, memory_store=memory)
+
+# Câu hỏi → tự route sang QA Pipeline (DataAgent → ChromaDB → WildfireQAAgent)
+result = orchestrator.run("What causes wildfires in the Amazon rainforest?")
+print(result["task_type"])   # "qa"
+print(result["answer"])
+print(result["citations"])
+
+# Dự đoán → tự route sang Prediction Pipeline (DataAgent → Model → RSEN)
+result = orchestrator.run("Predict wildfire risk for California next 7 days")
+print(result["task_type"])   # "prediction"
+print(result["risk_level"])
+print(result["decision"])    # Plausible / Implausible
+print(result["rationale"])
+```
 
 ### Load hệ thống và chạy Planning Agent
 
@@ -408,11 +452,12 @@ Nếu sử dụng CALM trong nghiên cứu, có thể trích dẫn theo định 
 
 | Thành phần | Mô tả |
 |------------|--------|
+| **`CALMOrchestrator`** | **Điểm vào duy nhất. `run(query)` tự route sang QA hoặc Prediction pipeline.** `from_llm(llm, memory_store, tools, model_runner, config)` để khởi tạo nhanh. |
 | `PlanningAgent` | Phân rã query → JSON plan (URSA 3-node). |
 | `DataKnowledgeAgent` | collect → extract → retrieve (GEE, CDS, Web, ArXiv). |
 | `RSENModule` | `validate(prediction, met_data, spatial_data)` → Plausible/Implausible. |
 | `WildfireQAAgent` | QA pipeline với Evidence Evaluator. |
 | `EvaluatorAgent` | `evaluate(response, query)` → scores, passed. |
-| `ExecutionAgent` | `execute_step(step, context)` → result. |
+| `ExecutionAgent` | `execute_step(step, context)` → route data_knowledge / prediction / qa / rsen. |
 | `SafetyChecker` | `is_safe(action)`, `check_or_raise(action)`. |
 | `ChromaMemoryStore` | `add_texts()`, `similarity_search()`. |

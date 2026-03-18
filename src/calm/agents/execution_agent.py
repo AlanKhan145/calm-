@@ -41,7 +41,8 @@ You are a summarizing agent. Summarize the execution conversation.
 class ExecutionAgent:
     """
     Executes plan steps. Safety check before EVERY tool call.
-    Uses LangGraph with generator → reflector → summarizer pattern.
+    Routes to: data_knowledge | prediction | qa | web_search.
+    On failure: return {"error": "...", "result": null} — NEVER fabricate.
     """
 
     def __init__(
@@ -64,10 +65,16 @@ class ExecutionAgent:
     ) -> dict[str, Any]:
         """
         Execute a single plan step. Returns dict (never DataFrame).
-        On failure: return {"error": "...", "result": null} — NEVER fabricate.
+
+        Routing table (agent_name → tool key):
+          "data_knowledge" → tools["data_knowledge"].retrieve()
+          "prediction"     → tools["prediction"].predict()
+          "qa"             → tools["qa"].invoke()
+          "rsen"           → tools["rsen"].validate()
+          (web_search)     → tools["web_search"].search()
         """
         action = step.get("action", "")
-        agent_name = step.get("agent", "")
+        agent_name = str(step.get("agent", "")).lower().replace("-", "_")
         params = step.get("parameters", {}) or {}
         result: dict[str, Any] = {}
         try:
@@ -75,7 +82,7 @@ class ExecutionAgent:
                 tool = self.tools.get("data_knowledge")
                 if tool:
                     query_for_retrieve = (
-                        (params.get("query"))
+                        params.get("query")
                         or step.get("query")
                         or context.get("query", "")
                     )
@@ -85,13 +92,39 @@ class ExecutionAgent:
                         "error": "data_knowledge tool not available",
                         "result": None,
                     }
-            elif agent_name == "prediction":
+            elif agent_name in {"prediction", "predict_agent", "fire_prediction"}:
                 tool = self.tools.get("prediction")
                 if tool:
                     result = tool.predict(params)
                 else:
                     result = {
                         "error": "prediction tool not available",
+                        "result": None,
+                    }
+            elif agent_name in {"qa", "qa_agent", "question_answering"}:
+                tool = self.tools.get("qa")
+                if tool:
+                    q = (
+                        params.get("query")
+                        or step.get("query")
+                        or context.get("query", "")
+                    )
+                    result = tool.invoke(q)
+                else:
+                    result = {
+                        "error": "qa tool not available",
+                        "result": None,
+                    }
+            elif agent_name == "rsen":
+                tool = self.tools.get("rsen")
+                if tool:
+                    prediction = context.get("prediction", {})
+                    met = context.get("met_data", {})
+                    spatial = context.get("spatial_data", {})
+                    result = tool.validate(prediction, met, spatial)
+                else:
+                    result = {
+                        "error": "rsen tool not available",
                         "result": None,
                     }
             elif "web_search" in str(step) or "search" in str(action).lower():
@@ -106,7 +139,10 @@ class ExecutionAgent:
                         "result": None,
                     }
             else:
-                result = {"status": "skipped", "reason": f"Unknown action: {action}"}
+                result = {
+                    "status": "skipped",
+                    "reason": f"Unknown action: {action}",
+                }
         except PermissionError as e:
             result = {"error": str(e), "result": None}
         except Exception as e:

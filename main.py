@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-Điểm vào chính để chạy CALM demo.
+CALM — Điểm vào chính với CALMOrchestrator.
 
-Nạp biến môi trường từ .env, khởi tạo LLM và chạy Planning Agent với một
-câu truy vấn mẫu. Đảm bảo đã cài đặt package (pip install -e .) và
-đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env.
+Hệ thống tự động định tuyến câu truy vấn sang đúng pipeline:
+  • Câu hỏi  → QA Pipeline   (DataAgent → ChromaDB → WildfireQAAgent)
+  • Dự đoán  → Prediction Pipeline (DataAgent → PredictionAgent → RSEN)
+
+Không cần viết use-case riêng cho từng loại task. Chỉ cần gọi:
+    orchestrator.run(query)
+
+Đảm bảo đã cài đặt:  pip install -e .
+Và đặt API key trong .env: OPENAI_API_KEY hoặc OPENROUTER_API_KEY
 """
 
 from __future__ import annotations
@@ -12,7 +18,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Đảm bảo có thể import calm khi chạy từ thư mục gốc (chưa cài package)
 _root = Path(__file__).resolve().parent
 _src = _root / "src"
 if _src.exists() and str(_src) not in sys.path:
@@ -25,47 +30,115 @@ from calm.utils.env_loader import load_env
 load_env(_root / ".env")
 load_env(_root.parent / ".env")
 
-from calm.agents.planning_agent import PlanningAgent
+from calm.memory.chroma_store import ChromaMemoryStore
+from calm.orchestrator import CALMOrchestrator
+from calm.tools.web_search import WebSearchTool
+
+
+def _build_llm():
+    """Khởi tạo LLM từ biến môi trường."""
+    if os.environ.get("OPENROUTER_API_KEY"):
+        from langchain_openrouter import ChatOpenRouter
+
+        return ChatOpenRouter(
+            model=os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o"),
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            temperature=0.0,
+        )
+    if os.environ.get("OPENAI_API_KEY"):
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+            openai_api_key=os.environ["OPENAI_API_KEY"],
+            temperature=0.0,
+        )
+    raise ValueError(
+        "Chưa có API key. Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env"
+    )
+
+
+def _print_result(label: str, result: dict) -> None:
+    """In kết quả ra stdout theo loại task."""
+    print(f"\n{'='*60}")
+    print(f"  {label}")
+    print(f"{'='*60}")
+    task_type = result.get("task_type", "?")
+    print(f"  Task type  : {task_type}")
+    print(f"  Plan steps : {len(result.get('plan_steps', []))}")
+    print(f"  Error      : {result.get('error') or 'None'}")
+
+    if task_type == "qa":
+        print(f"  Answer     : {str(result.get('answer', ''))[:300]}")
+        print(f"  Confidence : {result.get('confidence', 0.0):.2f}")
+        citations = result.get("citations", [])
+        if citations:
+            print(f"  Citations  : {citations[0]}")
+        print(f"  Approved   : {result.get('approved', False)}")
+    elif task_type == "prediction":
+        print(f"  Risk level : {result.get('risk_level', '?')}")
+        print(f"  Confidence : {result.get('confidence', 0.0):.2f}")
+        print(f"  RSEN decision : {result.get('decision', '?')}")
+        rationale = str(result.get("rationale", ""))
+        if rationale:
+            print(f"  Rationale  : {rationale[:300]}")
 
 
 def main() -> None:
-    """Chạy demo Planning Agent: phân rã câu hỏi cháy rừng thành kế hoạch JSON."""
+    """
+    Demo: hai câu truy vấn khác loại → orchestrator tự định tuyến.
+
+    Query 1 (QA)         → route sang QA Pipeline
+    Query 2 (Prediction) → route sang Prediction Pipeline
+    """
     try:
-        if os.environ.get("OPENROUTER_API_KEY"):
-            from langchain_openrouter import ChatOpenRouter
-            llm = ChatOpenRouter(
-                model=os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o"),
-                api_key=os.environ["OPENROUTER_API_KEY"],
-                temperature=0.0,
-            )
-        elif os.environ.get("OPENAI_API_KEY"):
-            from langchain_openai import ChatOpenAI
-            llm = ChatOpenAI(
-                model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-                openai_api_key=os.environ["OPENAI_API_KEY"],
-                temperature=0.0,
-            )
-        else:
-            raise ValueError("Đặt OPENAI_API_KEY hoặc OPENROUTER_API_KEY trong .env")
-    except ImportError as e:
-        print("Lỗi thiếu thư viện: pip install -e . hoặc pip install -r requirements.txt")
-        print("Chi tiết:", e)
-        sys.exit(1)
-    except ValueError as e:
-        print("Lỗi cấu hình:", e)
+        llm = _build_llm()
+    except (ImportError, ValueError) as e:
+        print(f"[ERROR] {e}")
         sys.exit(1)
 
-    agent = PlanningAgent(llm=llm, config={}, n_max=3, f_max=3)
-    query = "Wildfire risk assessment for Amazon region next 7 days"
-    print("Query:", query)
-    print("Đang chạy Planning Agent...")
-    result = agent.invoke(query)
-    plan = result.get("final_output") or []
-    print("Kết quả:")
-    print("  Approved:", result.get("approved"))
-    print("  Số bước kế hoạch:", len(plan) if isinstance(plan, list) else 0)
-    for i, step in enumerate(plan if isinstance(plan, list) else [], 1):
-        print(f"  Bước {i}: {step.get('step_id', '?')} - {step.get('action', '?')}")
+    # ── Khởi tạo ChromaDB memory store ──────────────────────────────────
+    memory_store = ChromaMemoryStore(
+        collection_name="calm_main",
+        persist_directory=str(_root / ".chroma"),
+        use_openai_embeddings=bool(os.environ.get("OPENAI_API_KEY")),
+    )
+
+    # ── Công cụ (chỉ cần web_search cho demo; GEE/CDS là tuỳ chọn) ──────
+    tools: dict = {}
+    try:
+        tools["web_search"] = WebSearchTool()
+    except Exception:
+        pass
+
+    # ── Tạo Orchestrator ─────────────────────────────────────────────────
+    orchestrator = CALMOrchestrator.from_llm(
+        llm=llm,
+        memory_store=memory_store,
+        tools=tools,
+        config={"planner_n_max": 2, "qa_n_max": 2},
+    )
+
+    # ════════════════════════════════════════════════════════════════════
+    # Demo 1 — Câu hỏi: tự route sang QA Pipeline
+    # ════════════════════════════════════════════════════════════════════
+    qa_query = (
+        "What are the primary environmental factors contributing to the "
+        "increased wildfire frequency in the Amazon rainforest?"
+    )
+    print(f"\n[Query 1 — QA] {qa_query}")
+    qa_result = orchestrator.run(qa_query)
+    _print_result("QA Pipeline Result", qa_result)
+
+    # ════════════════════════════════════════════════════════════════════
+    # Demo 2 — Dự đoán: tự route sang Prediction Pipeline
+    # ════════════════════════════════════════════════════════════════════
+    pred_query = (
+        "Predict wildfire risk for California Central Valley over the next 7 days"
+    )
+    print(f"\n[Query 2 — Prediction] {pred_query}")
+    pred_result = orchestrator.run(pred_query)
+    _print_result("Prediction Pipeline Result", pred_result)
 
 
 if __name__ == "__main__":

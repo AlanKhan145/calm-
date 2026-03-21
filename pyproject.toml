@@ -22,7 +22,7 @@ dependencies = [
     "langchain-mcp-adapters",
     "earthengine-api",
     "cdsapi",
-    "duckduckgo-search",
+    "ddgs",
     "arxiv",
     "beautifulsoup4",
     "trafilatura",

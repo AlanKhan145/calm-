@@ -24,7 +24,7 @@ FlagEmbedding>=1.2.0
 # Data sources & tools
 earthengine-api
 cdsapi
-duckduckgo-search
+ddgs
 arxiv
 beautifulsoup4
 trafilatura

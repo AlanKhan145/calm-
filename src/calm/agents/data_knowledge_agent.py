@@ -179,7 +179,13 @@ class DataKnowledgeAgent:
             if isinstance(dc, str):
                 texts.append(dc)
             elif isinstance(dc, dict):
-                texts.append(json.dumps(dc, default=str))
+                # Web search results: format as prose for better extraction
+                title = dc.get("title") or dc.get("name") or ""
+                body = dc.get("body") or dc.get("snippet") or dc.get("content") or ""
+                if title or body:
+                    texts.append(f"Title: {title}\nContent: {body}".strip())
+                else:
+                    texts.append(json.dumps(dc, default=str))
         knowledge = {"factual_statements": [], "causal_relationships": []}
         for t in texts[:5]:
             k = self.extract_knowledge(t)

@@ -36,7 +36,10 @@ class WebSearchTool:
         self.safety_checker.check_or_raise(action)
         max_results = max_results or self.max_results
         try:
-            from duckduckgo_search import DDGS
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
 
             results = list(DDGS().text(query, max_results=max_results))
             return [

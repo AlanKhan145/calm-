@@ -53,10 +53,19 @@ class WildfireQAAgent(BaseCALMAgent):
         if not conv:
             retrieved = self.data_agent.retrieve(query)
             retrieved_str = json.dumps(retrieved, default=str)[:8000]
+            short_term_ctx = ""
+            if hasattr(self.memory_store, "get_short_term_context"):
+                short_term_ctx = self.memory_store.get_short_term_context(
+                    max_chars=800
+                )
+            ctx_extra = ""
+            if short_term_ctx:
+                ctx_extra = f"\n\nRecent session context:\n{short_term_ctx}"
             eval_prompt = (
                 EVIDENCE_EVALUATOR_SYSTEM_PROMPT
                 + f"\n\nOriginal query: {query}\n\nRetrieved data:\n"
                 + retrieved_str
+                + ctx_extra
             )
         else:
             last_str = str(conv[-1].content)[:8000]

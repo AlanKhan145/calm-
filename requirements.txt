@@ -13,11 +13,13 @@ langchain-openrouter
 langchain-ollama
 langchain-community
 langchain-chroma
+langchain-huggingface
 langchain-text-splitters
 
 # Vector store & embedding
 chromadb
 sentence-transformers
+FlagEmbedding>=1.2.0
 
 # Data sources & tools
 earthengine-api

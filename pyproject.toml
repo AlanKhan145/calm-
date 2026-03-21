@@ -15,6 +15,7 @@ dependencies = [
     "langchain-ollama",
     "langchain-community",
     "langchain-chroma",
+    "langchain-huggingface",
     "langchain-text-splitters",
     "mcp",
     "fastmcp",
@@ -41,7 +42,8 @@ dependencies = [
     "rich",
     "pyyaml",
     "jsonargparse",
-    "sentence-transformers"
+    "sentence-transformers",
+    "FlagEmbedding>=1.2.0",
 ]
 
 [project.scripts]

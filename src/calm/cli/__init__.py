@@ -38,6 +38,12 @@ def run(
         "--chroma-dir",
         help="Thư mục lưu ChromaDB",
     ),
+    reranker: bool = typer.Option(
+        False,
+        "--reranker",
+        "-r",
+        help="Bật BGE cross-encoder reranker + score fusion",
+    ),
 ) -> None:
     """
     Tự động định tuyến câu truy vấn sang đúng pipeline.
@@ -85,6 +91,7 @@ def run(
             collection_name="calm_cli",
             persist_directory=chroma_dir,
             use_openai_embeddings=bool(os.environ.get("OPENAI_API_KEY")),
+            use_reranker=reranker,
         )
         tools: dict = {}
         try:

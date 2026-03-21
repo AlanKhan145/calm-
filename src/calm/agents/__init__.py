@@ -10,6 +10,7 @@ from calm.agents.base_agent import AgentState, BaseCALMAgent
 from calm.agents.data_knowledge_agent import DataKnowledgeAgent
 from calm.agents.evaluator_agent import EvaluatorAgent
 from calm.agents.execution_agent import ExecutionAgent
+from calm.agents.memory_agent import MemoryAgent
 from calm.agents.planning_agent import PlanningAgent
 from calm.agents.prediction_reasoning_agent import PredictionReasoningAgent
 from calm.agents.qa_agent import WildfireQAAgent
@@ -21,6 +22,7 @@ __all__ = [
     "DataKnowledgeAgent",
     "EvaluatorAgent",
     "ExecutionAgent",
+    "MemoryAgent",
     "PlanningAgent",
     "PredictionReasoningAgent",
     "RSENModule",

@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from calm.agents.data_knowledge_agent import DataKnowledgeAgent
+from calm.agents.memory_agent import MemoryAgent
 from calm.agents.planning_agent import PlanningAgent
 from calm.agents.prediction_reasoning_agent import PredictionReasoningAgent
 from calm.agents.qa_agent import WildfireQAAgent
@@ -71,6 +72,7 @@ class CALMOrchestrator:
         qa_agent: WildfireQAAgent,
         prediction_agent: PredictionReasoningAgent,
         rsen: RSENModule,
+        memory_agent: MemoryAgent | None = None,
         config: dict | None = None,
     ) -> None:
         self.planner = planner
@@ -78,6 +80,7 @@ class CALMOrchestrator:
         self.qa_agent = qa_agent
         self.prediction_agent = prediction_agent
         self.rsen = rsen
+        self.memory_agent = memory_agent
         self.config = config or {}
 
     # ─────────────────────────────────────────
@@ -192,7 +195,7 @@ class CALMOrchestrator:
             }
 
         final_answer = qa_result.get("final_output") or {}
-        return {
+        result = {
             "task_type": "qa",
             "plan_steps": plan_steps,
             "data_collected": bool(data_result.get("retrieved_data")),
@@ -204,6 +207,10 @@ class CALMOrchestrator:
             "approved": qa_result.get("approved", False),
             "error": qa_result.get("error"),
         }
+        if self.memory_agent:
+            self.memory_agent.add_episode(query, result, "qa")
+            self.memory_agent.add_short_term(query, result)
+        return result
 
     # ─────────────────────────────────────────
     # Prediction Pipeline
@@ -277,7 +284,7 @@ class CALMOrchestrator:
                     "final_rationale": "",
                 }
 
-        return {
+        result = {
             "task_type": "prediction",
             "plan_steps": plan_steps,
             "prediction": prediction,
@@ -288,6 +295,10 @@ class CALMOrchestrator:
             "rationale": validation.get("final_rationale", ""),
             "error": prediction.get("error") or validation.get("error"),
         }
+        if self.memory_agent:
+            self.memory_agent.add_episode(query, result, "prediction")
+            self.memory_agent.add_short_term(query, result)
+        return result
 
     # ─────────────────────────────────────────
     # Helpers
@@ -345,6 +356,12 @@ class CALMOrchestrator:
         cfg = config or {}
         _tools = tools or {}
 
+        memory_agent = MemoryAgent(
+            long_term_store=memory_store,
+            short_term_size=cfg.get("memory_short_term_size", 5),
+            episodic_max=cfg.get("memory_episodic_max", 100),
+        )
+
         planner = PlanningAgent(
             llm=llm,
             config=cfg,
@@ -355,7 +372,7 @@ class CALMOrchestrator:
         data_agent = DataKnowledgeAgent(
             llm=llm,
             tools=_tools,
-            memory_store=memory_store,
+            memory_store=memory_agent,
             config=cfg,
         )
 
@@ -364,7 +381,7 @@ class CALMOrchestrator:
             llm=llm,
             data_agent=data_agent,
             web_search_tool=web_search,
-            memory_store=memory_store,
+            memory_store=memory_agent,
             config=cfg,
             n_max=cfg.get("qa_n_max", 3),
             f_max=cfg.get("qa_f_max", 3),
@@ -377,7 +394,7 @@ class CALMOrchestrator:
 
         rsen = RSENModule(
             llm=llm,
-            memory_store=memory_store,
+            memory_store=memory_agent,
             k=cfg.get("rsen_k", 3),
         )
 
@@ -387,5 +404,6 @@ class CALMOrchestrator:
             qa_agent=qa_agent,
             prediction_agent=prediction_agent,
             rsen=rsen,
+            memory_agent=memory_agent,
             config=cfg,
         )

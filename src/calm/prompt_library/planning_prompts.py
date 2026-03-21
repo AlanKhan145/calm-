@@ -51,18 +51,22 @@ and why. Do NOT include [APPROVED] if any issue remains.
 
 PLANNER_FORMALIZE_PROMPT = """
 Format the approved wildfire monitoring plan as a JSON array.
-Each step must have this exact schema:
+Each step MUST include "agent" — map actions to agents as follows:
+  • retrieve_knowledge, retrieve_data, collect_data → agent: "data_knowledge"
+  • web_search, search → agent: "qa"
+  • prediction_reasoning, invoke_prediction_model, run_model → agent: "prediction"
+  • validate_prediction, evaluate → agent: "rsen"
+  • compile_report, answer, explain → agent: "qa"
+  • other execution tasks → agent: "execution"
+
+Schema per step:
 [{
   "step_id": "step-1",
-  "action": "call_agent|use_tool|retrieve_data|run_model",
-  "agent": "data_knowledge|prediction|qa|execution|evaluator",
-  "parameters": {
-    "location": "string or GeoJSON",
-    "time_range": {"start": "ISO", "end": "ISO"},
-    "model": "lstm|utae|convlstm|firecastnet (if applicable)"
-  },
+  "action": "retrieve_knowledge|web_search|prediction_reasoning|compile_report|...",
+  "agent": "data_knowledge|qa|prediction|rsen|execution",
+  "parameters": {},
   "expected_output": ["string"],
   "success_criteria": ["string"]
 }]
-Output ONLY valid JSON. No markdown, no explanation.
+Output ONLY valid JSON. No markdown, no explanation. agent is REQUIRED.
 """

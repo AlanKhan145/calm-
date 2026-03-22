@@ -82,7 +82,8 @@ class ExecutionAgent:
                 tool = self.tools.get("data_knowledge")
                 if tool:
                     query_for_retrieve = (
-                        params.get("query")
+                        step.get("prompt")
+                        or params.get("query")
                         or step.get("query")
                         or context.get("query", "")
                     )
@@ -105,7 +106,8 @@ class ExecutionAgent:
                 tool = self.tools.get("qa")
                 if tool:
                     q = (
-                        params.get("query")
+                        step.get("prompt")
+                        or params.get("query")
                         or step.get("query")
                         or context.get("query", "")
                     )
@@ -134,7 +136,11 @@ class ExecutionAgent:
             elif "web_search" in str(step) or "search" in str(action).lower():
                 tool = self.tools.get("web_search")
                 if tool:
-                    q = params.get("query", context.get("query", ""))
+                    q = (
+                        step.get("prompt")
+                        or params.get("query")
+                        or context.get("query", "")
+                    )
                     results = tool.search(q)
                     result = {"results": results, "source": "web_search"}
                 else:

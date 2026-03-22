@@ -21,8 +21,8 @@ Follow a strict procedure:
 (2) Self-reflect for refinement pl~, approving or revising based on
     completeness, feasibility, and safety.
 (3) Formalize into JSON plan with: query_summary, extracted_elements,
-    plan_steps (including step_id, action, parameters, expected_output,
-    success_criteria), overall_goal, and metadata.
+    plan_steps (including step_id, action, agent, prompt, parameters,
+    expected_output, success_criteria), overall_goal, and metadata.
 
 Output format:
   <THOUGHT> for reasoning
@@ -51,7 +51,7 @@ and why. Do NOT include [APPROVED] if any issue remains.
 
 PLANNER_FORMALIZE_PROMPT = """
 Format the approved wildfire monitoring plan as a JSON array.
-Each step MUST include "agent" — map actions to agents as follows:
+Each step MUST include "agent" and "prompt" — map actions to agents as follows:
   • retrieve_knowledge, retrieve_data, collect_data → agent: "data_knowledge"
   • web_search, search → agent: "qa"
   • prediction_reasoning, invoke_prediction_model, run_model → agent: "prediction"
@@ -64,12 +64,13 @@ Schema per step:
   "step_id": "step-1",
   "action": "retrieve_knowledge|web_search|prediction_reasoning|compile_report|...",
   "agent": "data_knowledge|qa|prediction|rsen|execution",
+  "prompt": "Concrete instruction for this step (e.g. Retrieve satellite and ERA5 data for Amazon region for next 7 days)",
   "parameters": {
-    "location": "California|Amazon (tool tự geocode)",
-    "time_range": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} hoặc {"date": "YYYY-MM-DD"}
+    "location": "California|Amazon (tool geocodes)",
+    "time_range": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} or {"date": "YYYY-MM-DD"}
   },
   "expected_output": ["string"],
   "success_criteria": ["string"]
 }]
-Output ONLY valid JSON. No markdown, no explanation. agent is REQUIRED.
+Output ONLY valid JSON. No markdown, no explanation. agent and prompt are REQUIRED.
 """

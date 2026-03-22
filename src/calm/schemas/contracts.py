@@ -15,6 +15,7 @@ class PlanStep(BaseModel):
     step_id: str = Field(..., description="step-1, step-2, ...")
     action: str = Field(..., description="retrieve_knowledge, web_search, prediction_reasoning, compile_report, ...")
     agent: str = Field(..., description="data_knowledge, qa, prediction, rsen, execution")
+    prompt: str = Field(default="", description="Concrete instruction for agent to execute this step")
     parameters: dict[str, Any] = Field(default_factory=dict)
     expected_output: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)

@@ -121,10 +121,15 @@ class PlanningAgent(BaseCALMAgent):
                 steps = plan if isinstance(plan, list) else plan.get("plan_steps", plan)
                 if not isinstance(steps, list):
                     steps = [plan]
-                # Điền agent nếu thiếu (fallback từ action)
+                # Điền agent và prompt nếu thiếu (fallback từ action/params)
                 for s in steps:
-                    if isinstance(s, dict) and not s.get("agent"):
+                    if not isinstance(s, dict):
+                        continue
+                    if not s.get("agent"):
                         s["agent"] = _infer_agent(s)
+                    if not s.get("prompt") or not str(s.get("prompt", "")).strip():
+                        loc = (s.get("parameters") or {}).get("location", "")
+                        s["prompt"] = f"{s.get('action', 'execute')} for {loc or 'given location'}"
                 if isinstance(plan, list):
                     return {"final_output": steps, "approved": True, "error": None}
                 if isinstance(plan, dict) and "plan_steps" in plan:

@@ -31,8 +31,8 @@ def mock_llm_plan_approved(mock_llm):
         MagicMock(content="Plan is complete and feasible. [APPROVED]"),
         MagicMock(
             content='[{"step_id":"step-1","action":"call_agent",'
-            '"agent":"data_knowledge","parameters":{},'
-            '"expected_output":[],"success_criteria":[]}]'
+            '"agent":"data_knowledge","prompt":"Collect data for Amazon region",'
+            '"parameters":{},"expected_output":[],"success_criteria":[]}]'
         ),
     ]
     return mock_llm

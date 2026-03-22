@@ -27,6 +27,7 @@ def test_approved_on_first_reflection(mock_llm_plan_approved):
         "step_id",
         "action",
         "agent",
+        "prompt",
         "expected_output",
         "success_criteria",
     ]
@@ -36,7 +37,7 @@ def test_approved_on_first_reflection(mock_llm_plan_approved):
 def test_force_finalize_at_n_max(mock_llm):
     """URSA Code Block 1: force finalize at n_max, never crash."""
     valid_json = (
-        '[{"step_id":"s1","action":"test","agent":"qa",'
+        '[{"step_id":"s1","action":"test","agent":"qa","prompt":"Test step",'
         '"parameters":{},"expected_output":[],"success_criteria":[]}]'
     )
     mock_llm.invoke.side_effect = [
@@ -60,7 +61,7 @@ def test_json_retry_f_max(mock_llm):
         MagicMock(content="Looks good. [APPROVED]"),
         MagicMock(content="not json {{bad}}"),
         MagicMock(
-            content='[{"step_id":"s1","action":"test","agent":"qa",'
+            content='[{"step_id":"s1","action":"test","agent":"qa","prompt":"Test step",'
             '"parameters":{},"expected_output":[],"success_criteria":[]}]'
         ),
     ]

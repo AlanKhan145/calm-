@@ -1,10 +1,3 @@
-"""
-RouterAgent — xác định task_type, confidence, required_artifacts từ plan.
-
-Thay thế keyword fallback trong _classify_intent bằng LLM-based routing
-trả về TaskRouting (task_type, confidence, required_artifacts, next_steps).
-"""
-
 from __future__ import annotations
 
 import json
@@ -12,14 +5,14 @@ import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage
-
 from calm.schemas.contracts import TaskRouting
 
 logger = logging.getLogger(__name__)
 
 ROUTER_SYSTEM_PROMPT = """
-You are a task router for a wildfire monitoring system. Given a user query and the plan steps,
-determine the primary task type and what artifacts are needed.
+You are a task router for a wildfire monitoring system.
+Given a user query and the plan steps, determine the primary task type
+and what artifacts are needed.
 
 Task types:
 - qa: question answering, information retrieval, explain, describe, what/why/how
@@ -45,15 +38,32 @@ Respond with JSON only:
 
 class RouterAgent:
     """
-    Router dựa trên plan + query. Trả về TaskRouting thay vì keyword fallback.
+    Router dựa trên plan + query.
+    Trả về TaskRouting, fallback về keyword nếu LLM fail.
     """
 
     def __init__(self, llm, config: dict | None = None) -> None:
         self.llm = llm
         self.config = config or {}
         self._fallback_keywords = {
-            "prediction": {"predict", "forecast", "risk", "detect", "likelihood", "next week", "next days"},
-            "qa": {"what", "why", "how", "explain", "describe", "causes", "information"},
+            "prediction": {
+                "predict",
+                "forecast",
+                "risk",
+                "detect",
+                "likelihood",
+                "next week",
+                "next days",
+            },
+            "qa": {
+                "what",
+                "why",
+                "how",
+                "explain",
+                "describe",
+                "causes",
+                "information",
+            },
         }
 
     def route(
@@ -70,26 +80,40 @@ class RouterAgent:
 
         prompt = (
             ROUTER_SYSTEM_PROMPT
-            + f"\n\nQuery: {query}\n\nPlan steps:\n{json.dumps(plan_steps[:5], default=str)}"
+            + f"\n\nQuery: {query}\n\nPlan steps:\n{json.dumps(plan_steps[:5], default=str, ensure_ascii=False)}"
         )
+
         try:
             resp = self.llm.invoke([HumanMessage(content=prompt)])
             content = resp.content if hasattr(resp, "content") else str(resp)
-            content = content.strip()
-            if content.startswith("```"):
-                lines = content.split("\n")
-                content = "\n".join(
-                    ln for ln in lines
-                    if not ln.strip().startswith("```") and ln.strip() != "json"
-                )
+            content = self._strip_code_fence(str(content).strip())
+
             data = json.loads(content)
-            return TaskRouting(
-                task_type=data.get("task_type", "qa"),
-                confidence=float(data.get("confidence", 0.5)),
-                required_artifacts=data.get("required_artifacts", []),
-                next_steps=data.get("next_steps", []),
-                reasoning=data.get("reasoning", ""),
+
+            next_steps = self._ensure_str_list(data.get("next_steps", []))
+            required_artifacts = self._ensure_str_list(
+                data.get("required_artifacts", [])
             )
+
+            confidence_raw = data.get("confidence", 0.5)
+            try:
+                confidence = float(confidence_raw)
+            except (TypeError, ValueError):
+                confidence = 0.5
+            confidence = max(0.0, min(1.0, confidence))
+
+            task_type = str(data.get("task_type", "qa")).strip().lower()
+            if task_type not in {"qa", "prediction", "hybrid"}:
+                task_type = "qa"
+
+            return TaskRouting(
+                task_type=task_type,
+                confidence=confidence,
+                required_artifacts=required_artifacts,
+                next_steps=next_steps,
+                reasoning=str(data.get("reasoning", "")).strip(),
+            )
+
         except Exception as e:
             logger.warning("RouterAgent LLM failed, using keyword fallback: %s", e)
             return self._keyword_fallback(query, plan_steps)
@@ -101,19 +125,78 @@ class RouterAgent:
     ) -> TaskRouting:
         """Fallback dựa trên plan action/agent và query keywords."""
         q_lower = query.lower()
+
         for step in (plan_steps or []):
             action = str(step.get("action", "")).lower()
             agent = str(step.get("agent", "")).lower()
+
             if any(w in action or w in agent for w in ["predict", "forecast", "model", "run_model"]):
-                return TaskRouting(task_type="prediction", confidence=0.7, reasoning="From plan action/agent")
+                return TaskRouting(
+                    task_type="prediction",
+                    confidence=0.7,
+                    required_artifacts=["prediction"],
+                    next_steps=["Run prediction workflow based on planned model step."],
+                    reasoning="From plan action/agent",
+                )
+
             if any(w in action or w in agent for w in ["retrieve", "web_search", "qa", "compile_report"]):
-                return TaskRouting(task_type="qa", confidence=0.7, reasoning="From plan action/agent")
+                return TaskRouting(
+                    task_type="qa",
+                    confidence=0.7,
+                    required_artifacts=["evidence"],
+                    next_steps=["Retrieve evidence and answer the question."],
+                    reasoning="From plan action/agent",
+                )
 
         for w in self._fallback_keywords["prediction"]:
             if w in q_lower:
-                return TaskRouting(task_type="prediction", confidence=0.6, reasoning=f"Keyword: {w}")
+                return TaskRouting(
+                    task_type="prediction",
+                    confidence=0.6,
+                    required_artifacts=["prediction"],
+                    next_steps=["Run prediction pipeline."],
+                    reasoning=f"Keyword: {w}",
+                )
+
         for w in self._fallback_keywords["qa"]:
             if w in q_lower:
-                return TaskRouting(task_type="qa", confidence=0.6, reasoning=f"Keyword: {w}")
+                return TaskRouting(
+                    task_type="qa",
+                    confidence=0.6,
+                    required_artifacts=["evidence"],
+                    next_steps=["Retrieve evidence and answer the question."],
+                    reasoning=f"Keyword: {w}",
+                )
 
-        return TaskRouting(task_type="qa", confidence=0.5, reasoning="Default to QA")
+        return TaskRouting(
+            task_type="qa",
+            confidence=0.5,
+            required_artifacts=["evidence"],
+            next_steps=["Retrieve evidence and answer the question."],
+            reasoning="Default to QA",
+        )
+
+    @staticmethod
+    def _ensure_str_list(value: Any) -> list[str]:
+        """Chuẩn hóa value thành list[str]."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = value.strip()
+            return [value] if value else []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    @staticmethod
+    def _strip_code_fence(text: str) -> str:
+        """Bỏ ```json ... ``` nếu LLM trả về fenced code block."""
+        if text.startswith("```"):
+            lines = text.splitlines()
+            cleaned = [
+                line
+                for line in lines
+                if not line.strip().startswith("```") and line.strip().lower() != "json"
+            ]
+            return "\n".join(cleaned).strip()
+        return text

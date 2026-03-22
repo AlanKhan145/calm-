@@ -1,7 +1,7 @@
 """
 File: prediction_reasoning_agent.py
 Description: Prediction & Reasoning Agent — runs wildfire models
-             (LSTM, UTAE, ConvLSTM, FireCastNet), feeds into RSEN.
+             (SeasFire GRU, LSTM, FireCastNet), feeds into RSEN.
 Author: CALM Team
 Created: 2026-03-13
 """
@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 class PredictionReasoningAgent:
     """
-    Runs wildfire prediction models. SeasFire: 0.25° × 0.25°, 59 variables.
-    Returns prediction dict for RSEN. Never fabricate (NP-5.1).
+    Chạy model dự đoán cháy rừng. model_runner có thể là:
+    - SeasFireModelRunner: load seasfire-ml checkpoint, heuristic fallback khi không có features
+    - Bất kỳ object có .predict(parameters) -> {risk_level, confidence, result}
+    Trả về dict cho RSEN. Không bịa dữ liệu (NP-5.1).
     """
 
     def __init__(

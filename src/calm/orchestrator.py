@@ -8,6 +8,8 @@ Không còn 2 pipeline cứng; mọi bước đi theo plan JSON.
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from calm.agents.data_knowledge_agent import DataKnowledgeAgent
@@ -276,8 +278,10 @@ class CALMOrchestrator:
                 "[Orchestrator] Prediction data collection failed: %s", e
             )
 
-        # Step 2: Chạy model dự đoán
+        # Step 2: Chạy model dự đoán (truyền met_data, spatial_data cho heuristic/model)
         prediction: dict[str, Any] = {}
+        params["met_data"] = self._extract_met_data(data_result)
+        params["spatial_data"] = self._extract_spatial_data(data_result)
         try:
             prediction = self.prediction_agent.predict(params)
             logger.info(
@@ -300,8 +304,8 @@ class CALMOrchestrator:
         validation: dict[str, Any] = {}
         if not prediction.get("error"):
             try:
-                met_data = self._extract_met_data(data_result)
-                spatial_data = self._extract_spatial_data(data_result)
+                met_data = params.get("met_data") or self._extract_met_data(data_result)
+                spatial_data = params.get("spatial_data") or self._extract_spatial_data(data_result)
                 validation = self.rsen.validate(prediction, met_data, spatial_data)
                 logger.info(
                     "[Orchestrator] RSEN decision: %s",
@@ -372,6 +376,51 @@ class CALMOrchestrator:
     # Factory
     # ─────────────────────────────────────────
 
+    @staticmethod
+    def _build_seasfire_model_runner(config: dict):
+        """Tạo SeasFireModelRunner từ config nếu có checkpoint."""
+        pred_cfg = (
+            config.get("prediction")
+            or config.get("agent_config", {}).get("prediction")
+            or {}
+        )
+        checkpoint = pred_cfg.get("checkpoint", "")
+        if not checkpoint:
+            return None
+        try:
+            from calm.artifact.seasfire_runner import SeasFireRunner
+            from calm.artifact.model_runner import SeasFireModelRunner
+            from calm.artifact.feature_builder import SeasFireFeatureBuilder
+
+            ckpt = Path(checkpoint)
+            if not ckpt.is_absolute():
+                ckpt = Path.cwd() / ckpt
+            seasfire = SeasFireRunner(
+                checkpoint_path=ckpt,
+                config={
+                    "input_size": pred_cfg.get("seasfire_variables", 59),
+                    "hidden_size": pred_cfg.get("hidden_size", 64),
+                    "num_layers": pred_cfg.get("num_layers", 2),
+                },
+            )
+            seasfire.load()
+            dataset_path = (
+                os.path.expandvars(str(pred_cfg.get("dataset_path", "") or ""))
+                or os.environ.get("SEASFIRE_DATASET_PATH")
+                or ""
+            )
+            feature_builder = None
+            if dataset_path and Path(dataset_path).exists():
+                feature_builder = SeasFireFeatureBuilder(
+                    dataset_path=dataset_path,
+                    timesteps=pred_cfg.get("timesteps", 6),
+                    target_week=pred_cfg.get("target_week", 4),
+                )
+            return SeasFireModelRunner(seasfire, feature_builder)
+        except Exception as e:
+            logger.warning("Could not build SeasFireModelRunner: %s", e)
+            return None
+
     @classmethod
     def from_llm(
         cls,
@@ -429,8 +478,13 @@ class CALMOrchestrator:
             f_max=cfg.get("qa_f_max", 3),
         )
 
+        # Model runner: từ tham số hoặc từ config (seasfire checkpoint)
+        _model_runner = model_runner
+        if _model_runner is None and cfg.get("prediction", {}).get("checkpoint"):
+            _model_runner = _build_seasfire_model_runner(cfg)
+
         prediction_agent = PredictionReasoningAgent(
-            model_runner=model_runner,
+            model_runner=_model_runner,
             config=cfg,
         )
 

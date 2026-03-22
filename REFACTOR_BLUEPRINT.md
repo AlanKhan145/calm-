@@ -51,9 +51,10 @@ calm/src/calm/
 │   ├── ...
 ```
 
-## Việc còn lại (khi có seasfire-ml)
+## SeasFire integration (đã triển khai)
 
-1. **SeasFireFeatureBuilder** — đọc zarr, tạo features
-2. **SeasFireRunner.predict_batch()** — load checkpoint, chạy inference, lưu parquet
-3. **PredictionReasoningAgent** — đọc từ ArtifactStore thay vì gọi model trực tiếp
-4. **Nối data → features → model** — prediction pipeline truyền features thật vào model
+1. **SeasFireRunner** — load seasfire-ml GRU checkpoint (SEASFIRE_ML_PATH), predict_batch với tensor hoặc heuristic fallback từ met_data
+2. **SeasFireFeatureBuilder** — (lat, lon, time) → tensor từ dataset (SEASFIRE_DATASET_PATH, optional)
+3. **SeasFireModelRunner** — adapter predict(params) cho PredictionReasoningAgent
+4. **Orchestrator** — từ config `agent_config.prediction.checkpoint` tự tạo SeasFireModelRunner; truyền met_data/spatial_data vào predict
+5. **Fallback heuristic** — khi không có model/features: dùng temp, humidity từ GEE/CDS

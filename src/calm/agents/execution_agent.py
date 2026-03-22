@@ -96,7 +96,15 @@ class ExecutionAgent:
             elif agent_name in {"prediction", "predict_agent", "fire_prediction"}:
                 tool = self.tools.get("prediction")
                 if tool:
-                    result = tool.predict(params)
+                    # Enrich params: met_data, spatial_data từ context (data_knowledge step trước đó)
+                    pred_params = dict(params)
+                    if not pred_params.get("location"):
+                        pred_params["location"] = (context.get("parameters") or {}).get("location")
+                    if not pred_params.get("time_range"):
+                        pred_params["time_range"] = (context.get("parameters") or {}).get("time_range")
+                    pred_params["met_data"] = context.get("met_data")
+                    pred_params["spatial_data"] = context.get("spatial_data")
+                    result = tool.predict(pred_params)
                 else:
                     result = {
                         "error": "prediction tool not available",

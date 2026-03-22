@@ -19,11 +19,16 @@ agent_config:
     max_arxiv_papers: 3
 
   prediction:
-    model: firecastnet
-    checkpoint: checkpoints/firecastnet_seasfire.pt
+    model: gru  # seasfire-ml GRU
+    checkpoint: runs/gru_target-4_oci-0_time-l6.best_model.pt  # từ seasfire-ml train_gru.py
+    # SEASFIRE_ML_PATH: đường dẫn tới repo seasfire-ml (env)
+    # SEASFIRE_DATASET_PATH: data/train hoặc data/test (env, optional)
+    # dataset_path: data/train  # optional, set SEASFIRE_DATASET_PATH env
     device: cuda
     seasfire_resolution: 0.25
     seasfire_variables: 59
+    timesteps: 6
+    target_week: 4
 
   rsen:
     memory_collection: calm_rsen_memory

@@ -9,6 +9,7 @@ Created: 2026-03-13
 from calm.tools.arxiv_tool import ArXivTool
 from calm.tools.copernicus import CopernicusTool
 from calm.tools.earth_engine import EarthEngineTool
+from calm.tools.geocoding import GeocodingTool
 from calm.tools.safety_check import (
     CALM_SAFETY_PROMPT,
     URSA_SAFETY_PROMPT,
@@ -21,6 +22,7 @@ __all__ = [
     "CALM_SAFETY_PROMPT",
     "CopernicusTool",
     "EarthEngineTool",
+    "GeocodingTool",
     "SafetyChecker",
     "URSA_SAFETY_PROMPT",
     "WebSearchTool",

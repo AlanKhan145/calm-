@@ -109,7 +109,11 @@ class ExecutionAgent:
                         or step.get("query")
                         or context.get("query", "")
                     )
-                    result = tool.invoke(q)
+                    pre = context.get("data_result")
+                    try:
+                        result = tool.invoke(q, pre_retrieved=pre) if pre is not None else tool.invoke(q)
+                    except TypeError:
+                        result = tool.invoke(q)
                 else:
                     result = {
                         "error": "qa tool not available",

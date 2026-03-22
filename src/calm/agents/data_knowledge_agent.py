@@ -14,6 +14,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from calm.prompt_library.data_prompts import KNOWLEDGE_EXTRACTION_PROMPT
+from calm.utils.time_utils import resolve_time_range
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,44 @@ class DataKnowledgeAgent:
         self.config = config or {}
         self.dedup_check = self.config.get("dedup_check", True)
 
+    @staticmethod
+    def _dedup_key(
+        query: str,
+        location: Any,
+        time_range: dict | None,
+    ) -> str:
+        """Chuẩn hóa key dedup: task + location + time → tránh dedup sai khi khác vùng/thời gian."""
+        loc_str = ""
+        if isinstance(location, dict):
+            loc_str = f"lat{location.get('lat','')}lon{location.get('lon','')}"
+        elif location:
+            loc_str = str(location)
+        tr = time_range or {}
+        start = tr.get("start", "")
+        end = tr.get("end", "")
+        return f"{query} | {loc_str} | {start} {end}".strip()
+
+    def _resolve_location(self, location: Any) -> dict[str, float] | None:
+        """
+        Chuyển location (địa chỉ văn bản hoặc dict) → {lat, lon}.
+        Nếu là string (California, Amazon region...) → dùng geocoding tool.
+        """
+        if not location:
+            return None
+        if isinstance(location, dict) and "lat" in location and "lon" in location:
+            return {"lat": float(location["lat"]), "lon": float(location["lon"])}
+        if isinstance(location, dict):
+            lat = location.get("lat")
+            lon = location.get("lon")
+            if lat is not None and lon is not None:
+                return {"lat": float(lat), "lon": float(lon)}
+        geocoding = self.tools.get("geocoding")
+        if geocoding and isinstance(location, str) and location.strip():
+            geo = geocoding.geocode(location.strip())
+            if not geo.get("error") and geo.get("lat") and geo.get("lon"):
+                return {"lat": float(geo["lat"]), "lon": float(geo["lon"])}
+        return None
+
     def collect(
         self,
         query: str,
@@ -48,11 +87,19 @@ class DataKnowledgeAgent:
         FR-D05: Check deduplication before crawling.
         """
         params = parameters or {}
-        location = params.get("location", "")
-        time_range = params.get("time_range", {})
+        location_raw = params.get("location", "")
+        time_range = resolve_time_range(
+            params.get("time_range"),
+            default_today=self.config.get("default_today", True),
+        )
+        # Địa chỉ văn bản → tọa độ qua geocoding tool
+        location = self._resolve_location(location_raw) or (
+            location_raw if isinstance(location_raw, dict) else None
+        )
 
         if self.dedup_check:
-            existing = self.memory.similarity_search(query, k=1)
+            dedup_query = self._dedup_key(query, location, time_range)
+            existing = self.memory.similarity_search(dedup_query, k=1)
             if existing and existing[0]:
                 logger.info(
                     "Dedup: similar query found, avoiding redundant crawl"

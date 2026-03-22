@@ -64,7 +64,10 @@ Schema per step:
   "step_id": "step-1",
   "action": "retrieve_knowledge|web_search|prediction_reasoning|compile_report|...",
   "agent": "data_knowledge|qa|prediction|rsen|execution",
-  "parameters": {},
+  "parameters": {
+    "location": "California|Amazon (tool tự geocode)",
+    "time_range": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} hoặc {"date": "YYYY-MM-DD"}
+  },
   "expected_output": ["string"],
   "success_criteria": ["string"]
 }]

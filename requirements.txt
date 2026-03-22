@@ -22,6 +22,7 @@ sentence-transformers
 FlagEmbedding>=1.2.0
 
 # Data sources & tools
+geopy
 earthengine-api
 cdsapi
 ddgs

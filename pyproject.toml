@@ -22,6 +22,7 @@ dependencies = [
     "langchain-mcp-adapters",
     "earthengine-api",
     "cdsapi",
+    "geopy",
     "ddgs",
     "arxiv",
     "beautifulsoup4",

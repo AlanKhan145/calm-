@@ -117,31 +117,31 @@ class TestClassifyIntent:
     def test_prediction_from_plan_action(self):
         orc = self._make_orchestrator()
         steps = [{"action": "predict_wildfire", "agent": "prediction"}]
-        assert orc._classify_intent(steps, "tell me") == "prediction"
+        assert orc._classify_intent_fallback(steps, "tell me") == "prediction"
 
     def test_qa_from_plan_action(self):
         orc = self._make_orchestrator()
         steps = [{"action": "qa", "agent": "qa_agent"}]
-        assert orc._classify_intent(steps, "predict fire") == "qa"
+        assert orc._classify_intent_fallback(steps, "predict fire") == "qa"
 
     def test_prediction_from_query_keyword(self):
         orc = self._make_orchestrator()
-        assert orc._classify_intent([], "predict wildfire risk next 7 days") == "prediction"
+        assert orc._classify_intent_fallback([], "predict wildfire risk next 7 days") == "prediction"
 
     def test_qa_from_query_keyword(self):
         orc = self._make_orchestrator()
-        assert orc._classify_intent([], "What causes wildfires in the Amazon?") == "qa"
+        assert orc._classify_intent_fallback([], "What causes wildfires in the Amazon?") == "qa"
 
     def test_default_qa_when_no_match(self):
         orc = self._make_orchestrator()
-        assert orc._classify_intent([], "climate change impacts forests") == "qa"
+        assert orc._classify_intent_fallback([], "climate change impacts forests") == "qa"
 
     def test_plan_takes_priority_over_query(self):
         """Plan action beats query keywords."""
         orc = self._make_orchestrator()
         steps = [{"action": "call_prediction_agent", "agent": "prediction"}]
         # query says "what" but plan says prediction
-        assert orc._classify_intent(steps, "what is the fire risk") == "prediction"
+        assert orc._classify_intent_fallback(steps, "what is the fire risk") == "prediction"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

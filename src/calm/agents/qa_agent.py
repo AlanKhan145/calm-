@@ -46,12 +46,29 @@ class WildfireQAAgent(BaseCALMAgent):
         self.memory_store = memory_store
         self.evidence_threshold = (config or {}).get("evidence_threshold", 0.65)
 
+    def invoke(self, query: str, pre_retrieved: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Chạy QA. Nếu orchestrator đã gọi retrieve, truyền pre_retrieved để tránh gọi lại."""
+        self._pre_retrieved = pre_retrieved
+        try:
+            return super().invoke(query)
+        finally:
+            self._pre_retrieved = None
+
     def _generator_node(self, state: AgentState) -> dict[str, Any]:
-        """Retrieve data and run evidence evaluation."""
+        """Retrieve data and run evidence evaluation. Dùng pre_retrieved nếu có (tránh duplicate)."""
         query = state["query"]
         conv = state.get("conversation") or []
         if not conv:
-            retrieved = self.data_agent.retrieve(query)
+            pre = getattr(self, "_pre_retrieved", None)
+            if pre is not None:
+                retrieved = pre
+                if pre.get("dedup") and hasattr(self.memory_store, "similarity_search"):
+                    docs = self.memory_store.similarity_search(query, k=5)
+                    if docs:
+                        ctx = [getattr(d, "page_content", str(d)) for d in docs]
+                        retrieved = {**pre, "cached_context": ctx, "retrieved_data": [{"data_content": c} for c in ctx]}
+            else:
+                retrieved = self.data_agent.retrieve(query)
             retrieved_str = json.dumps(retrieved, default=str)[:8000]
             short_term_ctx = ""
             if hasattr(self.memory_store, "get_short_term_context"):

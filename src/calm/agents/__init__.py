@@ -14,6 +14,7 @@ from calm.agents.memory_agent import MemoryAgent
 from calm.agents.planning_agent import PlanningAgent
 from calm.agents.prediction_reasoning_agent import PredictionReasoningAgent
 from calm.agents.qa_agent import WildfireQAAgent
+from calm.agents.router_agent import RouterAgent
 from calm.agents.rsen_module import RSENModule
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "MemoryAgent",
     "PlanningAgent",
     "PredictionReasoningAgent",
+    "RouterAgent",
     "RSENModule",
     "WildfireQAAgent",
 ]

@@ -85,7 +85,6 @@ def run(
         # ── Memory + Tools ───────────────────────────────────────────────
         from calm.memory.chroma_store import ChromaMemoryStore
         from calm.orchestrator import CALMOrchestrator
-        from calm.tools.web_search import WebSearchTool
 
         memory = ChromaMemoryStore(
             collection_name="calm_cli",
@@ -93,17 +92,11 @@ def run(
             use_openai_embeddings=bool(os.environ.get("OPENAI_API_KEY")),
             use_reranker=reranker,
         )
-        tools: dict = {}
-        try:
-            tools["web_search"] = WebSearchTool()
-        except Exception:
-            pass
-
         # ── Orchestrator ─────────────────────────────────────────────────
         orchestrator = CALMOrchestrator.from_llm(
             llm=llm,
             memory_store=memory,
-            tools=tools,
+            tools={},
         )
 
         console.print(f"\n[bold cyan]Query:[/bold cyan] {query}")

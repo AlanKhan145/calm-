@@ -41,7 +41,24 @@ cd calm
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 # Linux/macOS: source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements.txt
+# hoặc cài editable package:
+pip install -e .
+```
+
+#### Cài PyTorch CPU-only (máy không có GPU)
+
+Nếu bạn chạy trên máy không có CUDA/GPU, cài lại PyTorch CPU-only trước khi chạy demo:
+
+```bash
+# Linux / Windows
+pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+```
+
+Sau đó cài lại dependencies của CALM:
+
+```bash
+pip install -r requirements.txt
 ```
 
 ### 2. Biến môi trường
@@ -266,7 +283,7 @@ print(eval_result["average_score"], eval_result["passed"], eval_result["scores"]
 ## Phát triển
 
 ```bash
-pip install -e ".[dev]"
+pip install -r requirements.txt
 pytest tests/ -v
 ```
 

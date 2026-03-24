@@ -147,9 +147,17 @@ class DataKnowledgeAgent:
                 met = cds.fetch_era5(
                     lat=lat, lon=lon, time_range=time_range
                 )
+                met_summary = met.get("summary", {}) if isinstance(met, dict) else {}
                 data["retrieved_data"].append({
                     "sub_question_id": "met",
-                    "data_content": met,
+                    "data_content": {
+                        **(met if isinstance(met, dict) else {}),
+                        # Flatten key fields so model heuristic can consume directly.
+                        "temperature": met_summary.get("temperature"),
+                        "humidity": met_summary.get("humidity"),
+                        "wind_speed": met_summary.get("wind_speed"),
+                        "precipitation": met_summary.get("precipitation"),
+                    },
                     "source": "Copernicus CDS",
                     "citation": "ERA5",
                     "confidence_score": 0.9,

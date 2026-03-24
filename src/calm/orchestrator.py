@@ -361,7 +361,18 @@ class CALMOrchestrator:
         """Lấy dữ liệu khí tượng từ kết quả thu thập."""
         for item in data_result.get("retrieved_data", []):
             if item.get("source") in {"Copernicus CDS", "ERA5"}:
-                return item.get("data_content") or {}
+                met = item.get("data_content") or {}
+                if not isinstance(met, dict):
+                    return {}
+                summary = met.get("summary")
+                if isinstance(summary, dict):
+                    return {
+                        "temperature": met.get("temperature", summary.get("temperature")),
+                        "humidity": met.get("humidity", summary.get("humidity")),
+                        "wind_speed": met.get("wind_speed", summary.get("wind_speed")),
+                        "precipitation": met.get("precipitation", summary.get("precipitation")),
+                    }
+                return met
         return {}
 
     @staticmethod
@@ -369,7 +380,18 @@ class CALMOrchestrator:
         """Lấy dữ liệu địa lý từ kết quả thu thập."""
         for item in data_result.get("retrieved_data", []):
             if item.get("source") in {"GEE", "Google Earth Engine"}:
-                return item.get("data_content") or {}
+                spatial = item.get("data_content") or {}
+                if not isinstance(spatial, dict):
+                    return {}
+                stats = spatial.get("stats")
+                if isinstance(stats, dict):
+                    return {
+                        **spatial,
+                        "ndvi_mean": stats.get("ndvi_mean"),
+                        "ndvi_min": stats.get("ndvi_min"),
+                        "ndvi_max": stats.get("ndvi_max"),
+                    }
+                return spatial
         return {}
 
     # ─────────────────────────────────────────
@@ -443,6 +465,18 @@ class CALMOrchestrator:
         cfg = config or {}
         _tools = dict(tools or {})
         safety = SafetyChecker(llm=llm)
+        if "earth_engine" not in _tools:
+            from calm.tools.earth_engine import EarthEngineTool
+            _tools["earth_engine"] = EarthEngineTool(safety_checker=safety, config=cfg)
+        if "copernicus" not in _tools:
+            from calm.tools.copernicus import CopernicusTool
+            _tools["copernicus"] = CopernicusTool(safety_checker=safety, config=cfg)
+        if "web_search" not in _tools:
+            from calm.tools.web_search import WebSearchTool
+            _tools["web_search"] = WebSearchTool(safety_checker=safety, config=cfg)
+        if "arxiv" not in _tools:
+            from calm.tools.arxiv_tool import ArXivTool
+            _tools["arxiv"] = ArXivTool(safety_checker=safety, config=cfg)
         if "geocoding" not in _tools:
             from calm.tools.geocoding import GeocodingTool
             _tools["geocoding"] = GeocodingTool(safety_checker=safety, config=cfg)
@@ -481,7 +515,7 @@ class CALMOrchestrator:
         # Model runner: từ tham số hoặc từ config (seasfire checkpoint)
         _model_runner = model_runner
         if _model_runner is None and cfg.get("prediction", {}).get("checkpoint"):
-            _model_runner = _build_seasfire_model_runner(cfg)
+            _model_runner = cls._build_seasfire_model_runner(cfg)
 
         prediction_agent = PredictionReasoningAgent(
             model_runner=_model_runner,

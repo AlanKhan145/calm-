@@ -32,7 +32,6 @@ load_env(_root.parent / ".env")
 
 from calm.memory.chroma_store import ChromaMemoryStore
 from calm.orchestrator import CALMOrchestrator
-from calm.tools.web_search import WebSearchTool
 
 
 def _build_llm():
@@ -104,18 +103,11 @@ def main() -> None:
         use_openai_embeddings=bool(os.environ.get("OPENAI_API_KEY")),
     )
 
-    # ── Công cụ (chỉ cần web_search cho demo; GEE/CDS là tuỳ chọn) ──────
-    tools: dict = {}
-    try:
-        tools["web_search"] = WebSearchTool()
-    except Exception:
-        pass
-
     # ── Tạo Orchestrator ─────────────────────────────────────────────────
     orchestrator = CALMOrchestrator.from_llm(
         llm=llm,
         memory_store=memory_store,
-        tools=tools,
+        tools={},
         config={"planner_n_max": 2, "qa_n_max": 2},
     )
 

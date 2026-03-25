@@ -1,16 +1,13 @@
 """
-GeocodingTool — chuyển địa chỉ văn bản thành tọa độ và metadata không gian.
+GeocodingTool — chuyển địa chỉ/vùng văn bản thành tọa độ + metadata không gian.
 
-Dùng Nominatim (OpenStreetMap), không cần API key.
-
-Bản này hỗ trợ:
-- point query vs area query
-- bbox
-- admin_level
-- country / state / region
-- cache theo normalized place name
-- confidence cho geocoding
-- area metadata để downstream retrieval (ví dụ GEE) dùng được
+Thiết kế mới:
+- dùng geopy + Nominatim
+- hỗ trợ point query và area query
+- lấy nhiều candidates rồi tự xếp hạng
+- ưu tiên bbox thật cho region queries
+- không dùng safety checker kiểu LLM để chặn public place names
+- output phù hợp cho QueryNormalizerAgent / prediction pipeline
 """
 
 from __future__ import annotations
@@ -23,11 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 class GeocodingTool:
-    """Geocoding tool cho point và area queries."""
+    """Geocoding tool cho point/area query, tối ưu cho downstream planning + prediction."""
 
     def __init__(
         self,
-        safety_checker,
+        safety_checker=None,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.safety_checker = safety_checker
@@ -36,6 +33,10 @@ class GeocodingTool:
         self.timeout = int(self.config.get("timeout", 10))
         self.language = self.config.get("language", "en")
         self.country_bias = self.config.get("country_bias")
+        self.max_candidates = int(self.config.get("max_candidates", 5))
+        self.enable_safety_for_geocoding = bool(
+            self.config.get("enable_safety_for_geocoding", False)
+        )
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     # ─────────────────────────────────────────
@@ -44,16 +45,15 @@ class GeocodingTool:
 
     def geocode(self, address: str) -> Dict[str, Any]:
         """
-        Geocode text -> spatial metadata.
-
         Output chuẩn:
+
         {
             "query": "...",
             "normalized_query": "...",
             "name": "...",
             "display_name": "...",
             "query_type": "point_query|area_query|unknown",
-            "geometry_type": "point|bbox",
+            "geometry_type": "point|bbox|unknown",
             "lat": ...,
             "lon": ...,
             "latitude": ...,
@@ -65,10 +65,15 @@ class GeocodingTool:
             "region": "...",
             "county": "...",
             "city": "...",
-            "area_metadata": {...},
+            "district": "...",
             "confidence": 0.0-1.0,
+            "resolution_kind": "exact|ranked_candidate|region_bbox|centroid_fallback|ambiguous|error",
+            "needs_region_bbox": bool,
+            "candidates": [...],
+            "area_metadata": {...},
             "raw_type": "...",
             "raw_class": "...",
+            "addresstype": "...",
             "error": None | "..."
         }
         """
@@ -82,20 +87,22 @@ class GeocodingTool:
         if cached is not None:
             return dict(cached)
 
-        action = "Geocoding: %s" % query
-        self.safety_checker.check_or_raise(action)
+        if self.enable_safety_for_geocoding and self.safety_checker is not None:
+            if not self._is_safe_geocoding_text(query):
+                result = self._error_result(query, "unsafe geocoding query")
+                self._cache_store(query, normalized_query, result)
+                return result
 
         try:
-            from geopy.exc import GeocoderServiceError, GeocoderTimedOut
+            from geopy.exc import GeocoderServiceError, GeocoderTimedOut, GeocoderUnavailable
             from geopy.geocoders import Nominatim
 
             geolocator = Nominatim(user_agent=self.user_agent)
-
             query_type_hint = self._infer_query_type_from_text(query)
 
-            loc = geolocator.geocode(
+            results = geolocator.geocode(
                 query,
-                exactly_one=True,
+                exactly_one=False,
                 timeout=self.timeout,
                 addressdetails=True,
                 namedetails=True,
@@ -105,25 +112,74 @@ class GeocodingTool:
                 country_codes=self.country_bias,
             )
 
-            if loc is None:
-                result = self._error_result(query, "Không tìm thấy: %s" % query)
+            if not results:
+                result = self._error_result(query, f"Không tìm thấy: {query}")
                 self._cache_store(query, normalized_query, result)
                 return result
 
-            raw = getattr(loc, "raw", {}) or {}
-            result = self._build_result(
-                query=query,
-                normalized_query=normalized_query,
-                loc=loc,
-                raw=raw,
-                query_type_hint=query_type_hint,
+            normalized_candidates: List[Dict[str, Any]] = []
+            for loc in results[: self.max_candidates]:
+                raw = getattr(loc, "raw", {}) or {}
+                cand = self._build_candidate(
+                    query=query,
+                    normalized_query=normalized_query,
+                    loc=loc,
+                    raw=raw,
+                    query_type_hint=query_type_hint,
+                )
+                if cand is not None:
+                    normalized_candidates.append(cand)
+
+            if not normalized_candidates:
+                result = self._error_result(query, f"Không chuẩn hóa được kết quả geocoding cho: {query}")
+                self._cache_store(query, normalized_query, result)
+                return result
+
+            ranked = sorted(
+                normalized_candidates,
+                key=lambda x: x.get("confidence", 0.0),
+                reverse=True,
             )
 
-            self._cache_store(query, normalized_query, result)
-            self._cache_store_aliases(result)
-            return dict(result)
+            best = ranked[0]
+            best = self._post_process_best_candidate(
+                query=query,
+                query_type_hint=query_type_hint,
+                candidate=best,
+            )
 
-        except (GeocoderTimedOut, GeocoderServiceError) as e:
+            if len(ranked) > 1:
+                gap = float(best.get("confidence", 0.0)) - float(ranked[1].get("confidence", 0.0))
+                ambiguous = gap < 0.12
+            else:
+                ambiguous = False
+
+            final = dict(best)
+            final["candidates"] = [
+                {
+                    "name": c.get("name"),
+                    "display_name": c.get("display_name"),
+                    "lat": c.get("lat"),
+                    "lon": c.get("lon"),
+                    "bbox": c.get("bbox"),
+                    "confidence": c.get("confidence"),
+                    "admin_level": c.get("admin_level"),
+                    "query_type": c.get("query_type"),
+                    "raw_type": c.get("raw_type"),
+                    "addresstype": c.get("addresstype"),
+                }
+                for c in ranked[: self.max_candidates]
+            ]
+
+            if ambiguous:
+                final["resolution_kind"] = "ambiguous"
+                final["ambiguity_note"] = "Multiple similarly plausible geocoding candidates found."
+
+            self._cache_store(query, normalized_query, final)
+            self._cache_store_aliases(final)
+            return dict(final)
+
+        except (GeocoderTimedOut, GeocoderUnavailable, GeocoderServiceError) as e:
             logger.warning("Geocoding failed for %s: %s", query, e)
             result = self._error_result(query, str(e))
             self._cache_store(query, normalized_query, result)
@@ -139,7 +195,6 @@ class GeocodingTool:
             self._cache_store(query, normalized_query, result)
             return result
 
-    # Compatibility aliases
     def resolve(self, address: str) -> Dict[str, Any]:
         return self.geocode(address)
 
@@ -150,17 +205,17 @@ class GeocodingTool:
         return self.geocode(address)
 
     # ─────────────────────────────────────────
-    # Core builders
+    # Candidate builders
     # ─────────────────────────────────────────
 
-    def _build_result(
+    def _build_candidate(
         self,
         query: str,
         normalized_query: str,
         loc: Any,
         raw: Dict[str, Any],
         query_type_hint: str,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         address = raw.get("address", {}) if isinstance(raw.get("address"), dict) else {}
         bbox = self._extract_bbox(raw)
         raw_type = str(raw.get("type") or "")
@@ -171,24 +226,47 @@ class GeocodingTool:
         lon = self._to_float(getattr(loc, "longitude", None))
 
         admin = self._extract_admin_metadata(address, raw, bbox)
+
         resolved_query_type = self._resolve_query_type(
+            query=query,
             query_type_hint=query_type_hint,
             raw_type=raw_type,
             addresstype=addresstype,
             bbox=bbox,
         )
 
-        geometry_type = "bbox" if self._is_area_like(resolved_query_type, bbox, raw_type, addresstype) else "point"
+        geometry_type = "bbox" if self._is_area_like(
+            query_type=resolved_query_type,
+            bbox=bbox,
+            raw_type=raw_type,
+            addresstype=addresstype,
+        ) else "point"
+
         confidence = self._estimate_confidence(
             query=query,
             display_name=str(getattr(loc, "address", "") or query),
+            name=self._best_name(raw, loc, query),
             raw_type=raw_type,
             addresstype=addresstype,
             bbox=bbox,
             query_type=resolved_query_type,
+            admin_level=admin.get("admin_level"),
         )
 
-        result = {
+        needs_region_bbox = False
+        resolution_kind = "ranked_candidate"
+
+        if resolved_query_type == "area_query":
+            if bbox is None:
+                needs_region_bbox = True
+                resolution_kind = "centroid_fallback"
+            elif self._is_point_sized_bbox(bbox):
+                needs_region_bbox = True
+                resolution_kind = "centroid_fallback"
+            else:
+                resolution_kind = "region_bbox"
+
+        return {
             "query": query,
             "normalized_query": normalized_query,
             "name": self._best_name(raw, loc, query),
@@ -222,12 +300,40 @@ class GeocodingTool:
                 "addresstype": addresstype,
             },
             "confidence": confidence,
+            "resolution_kind": resolution_kind,
+            "needs_region_bbox": needs_region_bbox,
             "raw_type": raw_type,
             "raw_class": raw_class,
             "addresstype": addresstype,
             "error": None,
         }
+
+    def _post_process_best_candidate(
+        self,
+        query: str,
+        query_type_hint: str,
+        candidate: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        result = dict(candidate)
+
+        # Nếu query giống vùng rộng mà bbox lại quá nhỏ, đánh dấu để downstream xử lý theo vùng.
+        if query_type_hint == "area_query":
+            if result.get("bbox") is None or self._is_point_sized_bbox(result.get("bbox")):
+                result["needs_region_bbox"] = True
+                result["resolution_kind"] = "centroid_fallback"
+                result["geometry_type"] = "point"
+
+        # Nếu bbox đủ lớn thì coi là area chuẩn.
+        if result.get("bbox") and self._is_large_bbox(result["bbox"]):
+            result["geometry_type"] = "bbox"
+            result["resolution_kind"] = "region_bbox"
+            result["needs_region_bbox"] = False
+
         return result
+
+    # ─────────────────────────────────────────
+    # Admin / query type inference
+    # ─────────────────────────────────────────
 
     def _extract_admin_metadata(
         self,
@@ -236,11 +342,7 @@ class GeocodingTool:
         bbox: Optional[Dict[str, float]],
     ) -> Dict[str, Any]:
         country = address.get("country")
-        state = (
-            address.get("state")
-            or address.get("state_district")
-            or address.get("province")
-        )
+        state = address.get("state") or address.get("state_district") or address.get("province")
         region = (
             address.get("region")
             or address.get("state_district")
@@ -282,56 +384,24 @@ class GeocodingTool:
             "district": district,
         }
 
-    # ─────────────────────────────────────────
-    # Query / type inference
-    # ─────────────────────────────────────────
-
     def _infer_query_type_from_text(self, query: str) -> str:
         q = self._normalize_place_name(query)
 
         area_markers = [
-            "region",
-            "area",
-            "forest",
-            "basin",
-            "delta",
-            "valley",
-            "northern",
-            "southern",
-            "eastern",
-            "western",
-            "central",
-            "province",
-            "state",
-            "county",
-            "district",
-            "territory",
-            "national park",
-            "amazon",
+            "region", "area", "forest", "basin", "delta", "valley",
+            "northern", "southern", "eastern", "western", "central",
+            "province", "state", "county", "district", "territory",
+            "national park", "amazon", "plateau", "highlands", "plain",
         ]
         point_markers = [
-            "street",
-            "st ",
-            " avenue",
-            " ave",
-            "road",
-            " rd",
-            "building",
-            "campus",
-            "airport",
-            "station",
-            "mount",
-            "mt ",
-            "peak",
-            "volcano",
+            "street", " st ", " avenue", " ave", "road", " rd", "building",
+            "campus", "airport", "station", "peak", "volcano",
         ]
 
         if any(marker in q for marker in area_markers):
             return "area_query"
         if any(marker in q for marker in point_markers):
             return "point_query"
-
-        # số nhà / địa chỉ cụ thể
         if re.search(r"\d{1,5}\s+\w+", q):
             return "point_query"
 
@@ -339,44 +409,34 @@ class GeocodingTool:
 
     def _resolve_query_type(
         self,
+        query: str,
         query_type_hint: str,
         raw_type: str,
         addresstype: str,
         bbox: Optional[Dict[str, float]],
     ) -> str:
-        if query_type_hint in {"point_query", "area_query"}:
-            if query_type_hint == "area_query":
-                return "area_query"
-            if not self._is_area_like("point_query", bbox, raw_type, addresstype):
-                return "point_query"
+        q = self._normalize_place_name(query)
+
+        if query_type_hint == "area_query":
+            return "area_query"
 
         area_types = {
-            "administrative",
-            "state",
-            "region",
-            "county",
-            "forest",
-            "nature_reserve",
-            "national_park",
-            "protected_area",
-            "archipelago",
-            "suburb",
+            "administrative", "state", "region", "county", "forest",
+            "nature_reserve", "national_park", "protected_area", "archipelago",
+            "suburb", "valley", "basin", "delta",
         }
         area_addresstypes = {
-            "state",
-            "region",
-            "county",
-            "administrative",
-            "suburb",
-            "district",
-            "city_district",
-            "province",
+            "state", "region", "county", "administrative",
+            "suburb", "district", "city_district", "province",
         }
 
         if raw_type in area_types or addresstype in area_addresstypes:
             return "area_query"
 
         if self._is_large_bbox(bbox):
+            return "area_query"
+
+        if "valley" in q or "delta" in q or "basin" in q:
             return "area_query"
 
         return "point_query"
@@ -395,7 +455,7 @@ class GeocodingTool:
         addresstype = str(addresstype or "").lower()
         raw_type = str(raw_type or "").lower()
 
-        if addresstype in {"country"}:
+        if addresstype == "country":
             return "country"
         if addresstype in {"state", "province"}:
             return "state"
@@ -406,7 +466,7 @@ class GeocodingTool:
         if addresstype in {"city", "town", "municipality", "village"}:
             return "city"
 
-        if raw_type in {"forest", "nature_reserve", "national_park", "protected_area"}:
+        if raw_type in {"forest", "nature_reserve", "national_park", "protected_area", "valley", "delta"}:
             return "region"
 
         if state and not county and not city:
@@ -427,10 +487,6 @@ class GeocodingTool:
     # ─────────────────────────────────────────
 
     def _extract_bbox(self, raw: Dict[str, Any]) -> Optional[Dict[str, float]]:
-        """
-        Nominatim trả boundingbox dạng:
-        [south, north, west, east]
-        """
         bb = raw.get("boundingbox")
         if not isinstance(bb, list) or len(bb) != 4:
             return None
@@ -453,35 +509,38 @@ class GeocodingTool:
         self,
         query: str,
         display_name: str,
+        name: str,
         raw_type: str,
         addresstype: str,
         bbox: Optional[Dict[str, float]],
         query_type: str,
+        admin_level: Optional[str],
     ) -> float:
-        """
-        Heuristic confidence:
-        - match tên càng sát càng tốt
-        - result type hợp lý càng tốt
-        - area query có bbox tốt hơn
-        """
-        score = 0.50
+        score = 0.45
 
         q = self._normalize_place_name(query)
         d = self._normalize_place_name(display_name)
+        n = self._normalize_place_name(name)
 
         if q and d:
-            if q == d:
+            if q == d or q == n:
                 score += 0.25
-            elif q in d or d in q:
-                score += 0.15
+            elif q in d or q in n:
+                score += 0.18
 
         if raw_type or addresstype:
-            score += 0.10
+            score += 0.08
+
+        if admin_level in {"region", "state", "county"}:
+            score += 0.06
 
         if query_type == "area_query" and bbox is not None:
-            score += 0.10
+            score += 0.12
 
         if query_type == "point_query" and not self._is_large_bbox(bbox):
+            score += 0.06
+
+        if self._is_large_bbox(bbox):
             score += 0.05
 
         if self._is_suspicious_match(q, d):
@@ -499,6 +558,16 @@ class GeocodingTool:
         except Exception:
             return False
 
+    def _is_point_sized_bbox(self, bbox: Optional[Dict[str, float]]) -> bool:
+        if not bbox:
+            return False
+        try:
+            lat_span = abs(float(bbox["max_lat"]) - float(bbox["min_lat"]))
+            lon_span = abs(float(bbox["max_lon"]) - float(bbox["min_lon"]))
+            return lat_span <= 0.005 and lon_span <= 0.005
+        except Exception:
+            return False
+
     def _is_area_like(
         self,
         query_type: str,
@@ -513,22 +582,11 @@ class GeocodingTool:
             return True
 
         area_types = {
-            "administrative",
-            "state",
-            "region",
-            "county",
-            "forest",
-            "nature_reserve",
-            "national_park",
-            "protected_area",
+            "administrative", "state", "region", "county", "forest",
+            "nature_reserve", "national_park", "protected_area", "valley", "delta",
         }
         area_addresstypes = {
-            "state",
-            "region",
-            "county",
-            "district",
-            "administrative",
-            "province",
+            "state", "region", "county", "district", "administrative", "province",
         }
 
         return raw_type in area_types or addresstype in area_addresstypes
@@ -547,8 +605,7 @@ class GeocodingTool:
         return None
 
     def _cache_store(self, original_query: str, normalized_query: str, result: Dict[str, Any]) -> None:
-        keys = [self._cache_key(original_query), normalized_query]
-        for key in keys:
+        for key in [self._cache_key(original_query), normalized_query]:
             if key:
                 self._cache[key] = dict(result)
 
@@ -559,6 +616,7 @@ class GeocodingTool:
             result.get("country"),
             result.get("state"),
             result.get("region"),
+            result.get("county"),
             result.get("city"),
         ]
         for alias in aliases:
@@ -568,7 +626,7 @@ class GeocodingTool:
                     self._cache[key] = dict(result)
 
     # ─────────────────────────────────────────
-    # Small utilities
+    # Utilities
     # ─────────────────────────────────────────
 
     def _best_name(self, raw: Dict[str, Any], loc: Any, fallback: str) -> str:
@@ -577,11 +635,13 @@ class GeocodingTool:
             value = namedetails.get(key)
             if value:
                 return str(value)
+
         address = raw.get("address", {}) if isinstance(raw.get("address"), dict) else {}
         for key in ["city", "county", "state", "region", "country"]:
             value = address.get(key)
             if value:
                 return str(value)
+
         return str(getattr(loc, "address", "") or fallback)
 
     def _normalize_place_name(self, value: str) -> str:
@@ -609,6 +669,23 @@ class GeocodingTool:
             return float(value)
         except Exception:
             return None
+
+    def _is_safe_geocoding_text(self, text: str) -> bool:
+        q = self._normalize_place_name(text)
+        if not q:
+            return False
+        if len(q) > 160:
+            return False
+
+        blocked = [
+            "password",
+            "api key",
+            "token",
+            "private address",
+            "home address",
+            "exact current location",
+        ]
+        return not any(x in q for x in blocked)
 
     def _error_result(self, query: str, error: str) -> Dict[str, Any]:
         normalized_query = self._normalize_place_name(query)
@@ -646,6 +723,9 @@ class GeocodingTool:
                 "addresstype": None,
             },
             "confidence": 0.0,
+            "resolution_kind": "error",
+            "needs_region_bbox": False,
+            "candidates": [],
             "raw_type": None,
             "raw_class": None,
             "addresstype": None,

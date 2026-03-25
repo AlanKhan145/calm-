@@ -1,30 +1,30 @@
 """
-Mô-đun Planning Agent — phân rã câu truy vấn cháy rừng thành kế hoạch JSON.
+Mô-đun Planning Agent — phân rã câu truy vấn thành kế hoạch JSON.
 
-Theo chuẩn URSA 3 node:
+Thiết kế:
     generator -> reflector -> formalizer
 
-Bản này siết chặt:
-- Prompt nhận thêm normalized_query_context.
-- Formalizer ép mọi step có đủ:
-    step_id, agent, action, parameters, expected_output, success_criteria
-- Với task prediction, plan tối thiểu phải có đủ chuỗi:
-    resolve query context
-    retrieve environmental data
-    build features
-    run model
-    validate via RSEN
-    refine/finalize
-- Không cho final plan thiếu agent.
-- Không cho prediction step có parameters rỗng.
-- Reflection lưu lỗi plan vào memory theo best-effort.
+Điểm chính của bản viết lại:
+- Parse LLM response robust hơn:
+  - hỗ trợ content là string / list block / object
+  - xử lý empty response
+  - bóc JSON từ prose, markdown fence, object/array lẫn trong text
+- Siết schema từng step:
+  - step_id, agent, action, parameters, expected_output, success_criteria
+- Với task prediction:
+  - ép đủ chain tối thiểu
+  - kiểm tra thứ tự chain
+  - prediction step phải có parameters không rỗng
+- Tận dụng normalized_query_context làm source of truth
+- Reflection/formalizer failures lưu vào memory theo best-effort
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -42,13 +42,17 @@ _ACTION_TO_AGENT = {
     "resolve query context": "execution",
     "normalize query": "execution",
     "retrieve_knowledge": "data_knowledge",
+    "retrieve data": "data_knowledge",
     "retrieve_data": "data_knowledge",
     "collect_data": "data_knowledge",
     "retrieve_historical": "data_knowledge",
     "retrieve environmental data": "data_knowledge",
     "satellite": "data_knowledge",
+    "meteorology": "data_knowledge",
+    "weather": "data_knowledge",
     "web_search": "qa",
     "search": "qa",
+    "qa": "qa",
     "prediction_reasoning": "prediction",
     "invoke_prediction": "prediction",
     "run_model": "prediction",
@@ -86,8 +90,14 @@ _REQUIRED_PREDICTION_CHAIN = [
 ]
 
 
+def _safe_json_dumps(data: Any) -> str:
+    try:
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(data)
+
+
 def _infer_agent(step: Dict[str, Any]) -> str:
-    """Suy luận agent từ action nếu thiếu."""
     agent = step.get("agent")
     if agent and str(agent).strip():
         return str(agent).strip()
@@ -99,13 +109,6 @@ def _infer_agent(step: Dict[str, Any]) -> str:
     return ""
 
 
-def _safe_json_dumps(data: Any) -> str:
-    try:
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    except Exception:
-        return str(data)
-
-
 def _strip_code_fence(text: str) -> str:
     content = (text or "").strip()
     if not content.startswith("```"):
@@ -114,10 +117,10 @@ def _strip_code_fence(text: str) -> str:
     lines = content.splitlines()
     cleaned: List[str] = []
     for line in lines:
-        striped = line.strip().lower()
-        if striped.startswith("```"):
+        stripped = line.strip().lower()
+        if stripped.startswith("```"):
             continue
-        if striped == "json":
+        if stripped == "json":
             continue
         cleaned.append(line)
     return "\n".join(cleaned).strip()
@@ -127,21 +130,43 @@ class PlanningAgent(BaseCALMAgent):
     """Agent lập kế hoạch cấp cao: query -> reflection -> JSON plan."""
 
     # ─────────────────────────────────────────
+    # Public / orchestration helpers
+    # ─────────────────────────────────────────
+
+    def run(self, state: AgentState) -> Dict[str, Any]:
+        """
+        Driver tối giản nếu orchestrator gọi trực tiếp agent.
+        Nếu hệ thống của bạn đã có graph riêng thì có thể không dùng hàm này.
+        """
+        generated = self._generator_node(state)
+        reflect_state = dict(state)
+        reflect_state["conversation"] = list(state.get("conversation") or []) + list(
+            generated.get("conversation") or []
+        )
+
+        reflected = self._reflector_node(reflect_state)
+
+        formalize_state = dict(reflect_state)
+        formalize_state["conversation"] = list(reflect_state.get("conversation") or []) + list(
+            reflected.get("conversation") or []
+        )
+        formalize_state["reflection_errors"] = reflected.get("reflection_errors", [])
+        formalize_state["reflection_approved"] = reflected.get("reflection_approved", False)
+
+        return self._formalizer_node(formalize_state)
+
+    # ─────────────────────────────────────────
     # Node 1: Generator
     # ─────────────────────────────────────────
 
     def _generator_node(self, state: AgentState) -> Dict[str, Any]:
-        """
-        Tạo kế hoạch nháp ban đầu.
-        Prompt nhận cả original query và normalized_query_context.
-        """
         prompt = self._build_generator_prompt(state)
         msgs = [HumanMessage(content=prompt)]
         msgs += state.get("conversation") or []
 
         try:
             resp = self.llm.invoke(msgs)
-            content = resp.content if hasattr(resp, "content") else str(resp)
+            content = self._extract_llm_text(resp)
         except Exception as e:
             logger.exception("Planning generator failed: %s", e)
             content = "[ERROR] Generator failed: %s" % e
@@ -156,13 +181,6 @@ class PlanningAgent(BaseCALMAgent):
     # ─────────────────────────────────────────
 
     def _reflector_node(self, state: AgentState) -> Dict[str, Any]:
-        """
-        Rà soát kế hoạch:
-        - đủ bước chưa
-        - có agent chưa
-        - prediction chain đã đủ chưa
-        - có dùng normalized_query_context hay đang tự đoán lại time/location
-        """
         prompt = self._build_reflection_prompt(state)
         msgs = [HumanMessage(content=prompt)]
         msgs += state.get("conversation") or []
@@ -173,12 +191,12 @@ class PlanningAgent(BaseCALMAgent):
 
         try:
             resp = self.llm.invoke(msgs)
-            reflection_text = resp.content if hasattr(resp, "content") else str(resp)
+            reflection_text = self._extract_llm_text(resp)
         except Exception as e:
             logger.exception("Planning reflector failed: %s", e)
             reflection_text = "[ERROR] Reflection failed: %s" % e
 
-        approved = "[APPROVED]" in reflection_text
+        approved = "[APPROVED]" in (reflection_text or "")
         if not approved:
             reflection_errors = self._extract_reflection_errors(reflection_text)
             self._store_reflection_issue_to_memory(
@@ -202,27 +220,32 @@ class PlanningAgent(BaseCALMAgent):
         """
         Chuyển nội dung đã duyệt sang JSON hợp lệ; tối đa f_max lần thử.
 
-        Siết chặt:
-        - mọi step phải có đủ schema
-        - prediction plan phải có đủ chain tối thiểu
-        - prediction step không được có parameters rỗng
+        Bản robust:
+        - không crash nếu content rỗng
+        - không crash nếu content là list block
+        - bóc JSON từ prose / code fence
+        - validate chặt hơn prediction chain
         """
         conv = list(state.get("conversation") or [])
         normalized_ctx = self._get_normalized_query_context(state)
         task_type = self._infer_task_type(state.get("query", ""), normalized_ctx)
+
         last_content = ""
         last_errors: List[str] = []
+        max_attempts = getattr(self, "f_max", 3) or 3
 
-        for attempt in range(self.f_max):
+        for attempt in range(max_attempts):
             prompt = self._build_formalizer_prompt(state, task_type=task_type)
             msgs = [HumanMessage(content=prompt)] + conv
 
             try:
                 resp = self.llm.invoke(msgs)
-                content = resp.content if hasattr(resp, "content") else str(resp)
-                last_content = (content or "").strip()
+                last_content = self._extract_llm_text(resp).strip()
 
-                parsed = json.loads(_strip_code_fence(last_content))
+                if not last_content:
+                    raise json.JSONDecodeError("Empty response from LLM", "", 0)
+
+                parsed = self._parse_json_loose(last_content)
                 steps = self._extract_steps_from_json(parsed)
 
                 steps = self._normalize_steps(
@@ -245,12 +268,13 @@ class PlanningAgent(BaseCALMAgent):
                         reflection_text="Formalizer validation failed",
                         reflection_errors=validation_errors,
                     )
-                    conv.append(AIMessage(content=last_content))
+                    conv.append(AIMessage(content=last_content or "[EMPTY RESPONSE]"))
                     conv.append(
                         HumanMessage(
                             content=(
                                 "Your JSON plan is invalid.\n"
                                 "Fix these issues and return ONLY valid JSON.\n"
+                                "Do not use markdown. Do not add explanations.\n"
                                 + "\n".join("- " + e for e in validation_errors)
                             )
                         )
@@ -266,26 +290,33 @@ class PlanningAgent(BaseCALMAgent):
 
             except json.JSONDecodeError as e:
                 last_errors = ["Invalid JSON: %s" % e]
-                logger.warning("Planning formalizer JSON decode failed: %s", e)
-                conv.append(AIMessage(content=last_content))
+                logger.warning(
+                    "Planning formalizer JSON decode failed: %s | raw=%r",
+                    e,
+                    (last_content or "")[:1000],
+                )
+                conv.append(AIMessage(content=last_content or "[EMPTY RESPONSE]"))
                 conv.append(
                     HumanMessage(
                         content=(
                             "Your response was not valid JSON.\n"
                             "Error: %s\n"
-                            "Return ONLY valid JSON." % e
+                            "Return ONLY valid JSON matching schema {\"plan_steps\": [...]}.\n"
+                            "Do not wrap in markdown. Do not include explanations.\n"
+                            "If unsure, return {\"plan_steps\": []}." % e
                         )
                     )
                 )
             except Exception as e:
                 last_errors = ["Formalizer exception: %s" % e]
                 logger.exception("Formalizer attempt %s failed: %s", attempt + 1, e)
-                conv.append(AIMessage(content=last_content))
+                conv.append(AIMessage(content=last_content or "[NO CONTENT]"))
                 conv.append(
                     HumanMessage(
                         content=(
                             "JSON parsing/normalization failed: %s\n"
-                            "Try again and return ONLY valid JSON." % e
+                            "Try again and return ONLY valid JSON.\n"
+                            "Do not wrap in markdown. Do not add explanations." % e
                         )
                     )
                 )
@@ -294,11 +325,11 @@ class PlanningAgent(BaseCALMAgent):
             query=state.get("query", ""),
             normalized_query_context=normalized_ctx,
             reflection_text="Formalizer failed after retries",
-            reflection_errors=last_errors or ["JSON formalization failed after f_max attempts"],
+            reflection_errors=last_errors or ["JSON formalization failed after retries"],
         )
 
         return {
-            "error": "JSON formalization failed after f_max attempts",
+            "error": "JSON formalization failed after retries",
             "final_output": None,
             "approved": False,
             "reflection_errors": state.get("reflection_errors", []) + last_errors,
@@ -337,6 +368,7 @@ Planner requirements:
    - refine/finalize
 5) Parameters must be concrete and non-empty for prediction-related steps.
 6) Output should be easy to formalize into strict JSON.
+7) Prefer concise, execution-ready actions over vague prose.
 """
 
         return (
@@ -372,6 +404,7 @@ Check:
   4. run model
   5. validate via RSEN
   6. refine/finalize
+- if task_type is prediction, the stages should appear in that logical order
 
 Response rules:
 - If fully valid, include [APPROVED].
@@ -398,6 +431,10 @@ Response rules:
 
         extra_rules = """
 Return ONLY valid JSON.
+Do not wrap in markdown.
+Do not include explanations.
+Do not include leading or trailing text.
+If you are unsure, still return valid JSON.
 
 Schema:
 {
@@ -441,6 +478,146 @@ For prediction tasks, include at least these stages in order:
         )
 
     # ─────────────────────────────────────────
+    # LLM output extraction / JSON parsing
+    # ─────────────────────────────────────────
+
+    def _extract_llm_text(self, resp: Any) -> str:
+        if resp is None:
+            return ""
+
+        if isinstance(resp, str):
+            return resp.strip()
+
+        content = getattr(resp, "content", None)
+
+        if isinstance(content, str):
+            return content.strip()
+
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    if item.strip():
+                        parts.append(item.strip())
+                    continue
+
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+                    continue
+
+                text_attr = getattr(item, "text", None)
+                if isinstance(text_attr, str) and text_attr.strip():
+                    parts.append(text_attr.strip())
+                    continue
+
+                content_attr = getattr(item, "content", None)
+                if isinstance(content_attr, str) and content_attr.strip():
+                    parts.append(content_attr.strip())
+
+            return "\n".join(parts).strip()
+
+        text = getattr(resp, "text", None)
+        if isinstance(text, str):
+            return text.strip()
+
+        generations = getattr(resp, "generations", None)
+        if generations:
+            try:
+                first = generations[0]
+                if isinstance(first, list) and first:
+                    item = first[0]
+                    item_text = getattr(item, "text", None)
+                    if isinstance(item_text, str):
+                        return item_text.strip()
+            except Exception:
+                pass
+
+        return str(resp).strip()
+
+    def _parse_json_loose(self, raw: str) -> Any:
+        text = (raw or "").strip()
+        if not text:
+            raise json.JSONDecodeError("Empty response from LLM", "", 0)
+
+        cleaned = _strip_code_fence(text).strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        fenced_candidates = self._extract_fenced_blocks(text)
+        for candidate in fenced_candidates:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+        json_candidate = self._find_first_json_substring(cleaned)
+        if json_candidate:
+            return json.loads(json_candidate)
+
+        raise json.JSONDecodeError("No JSON object/array found in model response", text, 0)
+
+    @staticmethod
+    def _extract_fenced_blocks(raw: str) -> List[str]:
+        blocks = re.findall(r"```(?:json)?\s*(.*?)```", raw or "", flags=re.DOTALL | re.IGNORECASE)
+        return [b.strip() for b in blocks if isinstance(b, str) and b.strip()]
+
+    @staticmethod
+    def _find_first_json_substring(raw: str) -> Optional[str]:
+        """
+        Tìm object/array JSON đầu tiên bằng bracket matching,
+        tránh regex tham lam gây bắt sai khi text dài.
+        """
+        if not raw:
+            return None
+
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start = raw.find(opener)
+            while start != -1:
+                depth = 0
+                in_string = False
+                escape = False
+
+                for idx in range(start, len(raw)):
+                    ch = raw[idx]
+
+                    if in_string:
+                        if escape:
+                            escape = False
+                        elif ch == "\\":
+                            escape = True
+                        elif ch == '"':
+                            in_string = False
+                        continue
+
+                    if ch == '"':
+                        in_string = True
+                        continue
+
+                    if ch == opener:
+                        depth += 1
+                    elif ch == closer:
+                        depth -= 1
+                        if depth == 0:
+                            candidate = raw[start : idx + 1]
+                            try:
+                                json.loads(candidate)
+                                return candidate
+                            except Exception:
+                                break
+
+                start = raw.find(opener, start + 1)
+
+        return None
+
+    # ─────────────────────────────────────────
     # Normalization / validation
     # ─────────────────────────────────────────
 
@@ -451,6 +628,12 @@ For prediction tasks, include at least these stages in order:
         if isinstance(parsed, dict):
             if isinstance(parsed.get("plan_steps"), list):
                 return [s for s in parsed["plan_steps"] if isinstance(s, dict)]
+
+            # hỗ trợ model trả {"steps": [...]}
+            if isinstance(parsed.get("steps"), list):
+                return [s for s in parsed["steps"] if isinstance(s, dict)]
+
+            # fallback: coi cả object là 1 step nếu có shape phù hợp
             return [parsed]
 
         raise ValueError("Formalizer output must be a JSON object or list")
@@ -461,15 +644,12 @@ For prediction tasks, include at least these stages in order:
         task_type: str,
         normalized_query_context: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
-        """
-        Chuẩn hóa plan:
-        - ép đủ field
-        - bổ sung agent nếu suy luận được
-        - prediction: ép đủ chain tối thiểu và đúng thứ tự
-        """
         normalized: List[Dict[str, Any]] = []
 
         for idx, raw_step in enumerate(steps, start=1):
+            if not isinstance(raw_step, dict):
+                continue
+
             step = dict(raw_step)
 
             if not step.get("step_id"):
@@ -512,7 +692,6 @@ For prediction tasks, include at least these stages in order:
                 normalized_query_context=normalized_query_context,
             )
 
-        # Reindex step_id sau khi chèn/sắp xếp lại
         for idx, step in enumerate(normalized, start=1):
             step["step_id"] = "step_%d" % idx
 
@@ -555,10 +734,8 @@ For prediction tasks, include at least these stages in order:
                     errors.append("Prediction plan step %d must have non-empty parameters" % idx)
 
         if task_type == "prediction":
-            prediction_chain_errors = self._validate_prediction_chain(steps)
-            errors.extend(prediction_chain_errors)
+            errors.extend(self._validate_prediction_chain(steps))
 
-            # Nếu normalized context đã có time/location thì plan không được bỏ mất hoàn toàn
             if normalized_query_context:
                 has_context_step = any(
                     self._action_matches(str(step.get("action", "")), "resolve query context")
@@ -575,10 +752,24 @@ For prediction tasks, include at least these stages in order:
         errors: List[str] = []
         actions = [str(step.get("action", "")) for step in steps]
 
+        positions: Dict[str, int] = {}
         for required_action in _REQUIRED_PREDICTION_CHAIN:
-            if not any(self._action_matches(action, required_action) for action in actions):
+            found_index = None
+            for idx, action in enumerate(actions):
+                if self._action_matches(action, required_action):
+                    found_index = idx
+                    break
+            if found_index is None:
+                errors.append("Prediction plan missing required stage: %s" % required_action)
+            else:
+                positions[required_action] = found_index
+
+        if len(positions) == len(_REQUIRED_PREDICTION_CHAIN):
+            ordered = [positions[a] for a in _REQUIRED_PREDICTION_CHAIN]
+            if ordered != sorted(ordered):
                 errors.append(
-                    "Prediction plan missing required stage: %s" % required_action
+                    "Prediction plan stages are present but not in the required order: "
+                    + " -> ".join(_REQUIRED_PREDICTION_CHAIN)
                 )
 
         return errors
@@ -592,10 +783,6 @@ For prediction tasks, include at least these stages in order:
         steps: List[Dict[str, Any]],
         normalized_query_context: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
-        """
-        Với prediction, ép đủ chain tối thiểu và đúng thứ tự.
-        Nếu thiếu step, thêm step mặc định có parameters không rỗng.
-        """
         ordered_steps: List[Dict[str, Any]] = []
         used_indexes = set()
 
@@ -619,19 +806,23 @@ For prediction tasks, include at least these stages in order:
             else:
                 used_indexes.add(matched_index)
                 matched_step["action"] = required_action
+
                 if not matched_step.get("agent"):
                     matched_step["agent"] = _infer_agent(matched_step)
-                if not matched_step.get("parameters"):
+
+                if not isinstance(matched_step.get("parameters"), dict) or not matched_step.get("parameters"):
                     matched_step["parameters"] = self._default_parameters_for_step(
                         action=required_action,
                         task_type="prediction",
                         normalized_query_context=normalized_query_context,
                     )
+
                 if not matched_step.get("expected_output"):
                     matched_step["expected_output"] = self._default_expected_output(
                         action=required_action,
                         agent=matched_step.get("agent", ""),
                     )
+
                 if not matched_step.get("success_criteria"):
                     matched_step["success_criteria"] = self._default_success_criteria(
                         action=required_action,
@@ -640,7 +831,6 @@ For prediction tasks, include at least these stages in order:
 
             ordered_steps.append(matched_step)
 
-        # Thêm các step phụ còn lại xuống cuối
         for idx, step in enumerate(steps):
             if idx not in used_indexes:
                 ordered_steps.append(step)
@@ -670,20 +860,57 @@ For prediction tasks, include at least these stages in order:
         text = str(action_text or "").strip().lower()
         target = canonical_action.strip().lower()
 
-        keyword_groups = {
-            "resolve query context": ["resolve", "context", "normalize", "query context"],
-            "retrieve environmental data": ["retrieve", "environment", "data", "meteorology", "satellite"],
-            "build features": ["build", "feature"],
-            "run model": ["run", "model", "predict"],
-            "validate via rsen": ["validate", "rsen", "evaluate"],
-            "refine/finalize": ["refine", "finalize", "finalise", "postprocess"],
+        synonym_groups = {
+            "resolve query context": [
+                "resolve query context",
+                "resolve context",
+                "normalize query",
+                "query normalization",
+                "query context",
+                "resolve location and time",
+            ],
+            "retrieve environmental data": [
+                "retrieve environmental data",
+                "retrieve data",
+                "collect data",
+                "environmental data",
+                "meteorology",
+                "satellite",
+                "weather",
+            ],
+            "build features": [
+                "build features",
+                "feature engineering",
+                "construct features",
+                "prepare features",
+            ],
+            "run model": [
+                "run model",
+                "predict",
+                "prediction",
+                "invoke model",
+                "invoke prediction",
+            ],
+            "validate via rsen": [
+                "validate via rsen",
+                "validate",
+                "rsen",
+                "evaluate plausibility",
+            ],
+            "refine/finalize": [
+                "refine/finalize",
+                "refine",
+                "finalize",
+                "finalise",
+                "postprocess",
+            ],
         }
 
-        if target not in keyword_groups:
+        variants = synonym_groups.get(target)
+        if not variants:
             return target in text
 
-        keywords = keyword_groups[target]
-        return any(k in text for k in keywords)
+        return any(variant in text for variant in variants)
 
     # ─────────────────────────────────────────
     # Defaults
@@ -701,9 +928,27 @@ For prediction tasks, include at least these stages in order:
             "normalized_query_context": normalized_query_context,
         }
 
-        location = normalized_query_context.get("location")
-        coordinates = normalized_query_context.get("coordinates") or {}
+        location = (
+            normalized_query_context.get("location")
+            or normalized_query_context.get("location_text")
+            or normalized_query_context.get("location_resolved", {}).get("name")
+            if isinstance(normalized_query_context.get("location_resolved"), dict)
+            else normalized_query_context.get("location")
+        )
+
+        coordinates = (
+            normalized_query_context.get("coordinates")
+            or {
+                "lat": normalized_query_context.get("lat"),
+                "lon": normalized_query_context.get("lon"),
+            }
+        )
+        if coordinates == {"lat": None, "lon": None}:
+            coordinates = {}
+
         time_range = normalized_query_context.get("time_range")
+        prediction_target = normalized_query_context.get("prediction_target")
+        requested_output = normalized_query_context.get("requested_output") or []
 
         action_lower = str(action or "").strip().lower()
 
@@ -715,31 +960,36 @@ For prediction tasks, include at least these stages in order:
                 "location": location,
                 "coordinates": coordinates,
                 "time_range": time_range,
+                "prediction_target": prediction_target,
+                "requested_output": requested_output,
                 "data_sources": ["earth_engine", "copernicus", "web_search"],
                 "query_context": base_context,
             }
-            return {k: v for k, v in params.items() if v not in (None, "", {})}
+            return {k: v for k, v in params.items() if v not in (None, "", {}, [])}
 
         if "build" in action_lower and "feature" in action_lower:
             params = {
                 "location": location,
                 "coordinates": coordinates,
                 "time_range": time_range,
+                "prediction_target": prediction_target,
                 "input_refs": ["retrieved_environmental_data"],
                 "query_context": base_context,
             }
-            return {k: v for k, v in params.items() if v not in (None, "", {})}
+            return {k: v for k, v in params.items() if v not in (None, "", {}, [])}
 
         if "run" in action_lower and "model" in action_lower:
             params = {
                 "location": location,
                 "coordinates": coordinates,
                 "time_range": time_range,
+                "prediction_target": prediction_target,
                 "model_input_ref": "built_features",
                 "task_type": task_type,
+                "requested_output": requested_output,
                 "query_context": base_context,
             }
-            return {k: v for k, v in params.items() if v not in (None, "", {})}
+            return {k: v for k, v in params.items() if v not in (None, "", {}, [])}
 
         if "validate" in action_lower or "rsen" in action_lower:
             return {
@@ -753,6 +1003,7 @@ For prediction tasks, include at least these stages in order:
         if "refine" in action_lower or "finalize" in action_lower:
             return {
                 "prediction_ref": "validated_prediction",
+                "requested_output": requested_output,
                 "refinement_policy": {
                     "requery_if_implausible": True,
                     "expand_time_window_if_needed": True,
@@ -777,7 +1028,7 @@ For prediction tasks, include at least these stages in order:
         if "build" in action_lower and "feature" in action_lower:
             return "Feature set ready for wildfire prediction model"
         if "run" in action_lower and "model" in action_lower:
-            return "Raw wildfire prediction output with risk_level, confidence, and model rationale"
+            return "Raw prediction output with risk_level, confidence, and model rationale"
         if "validate" in action_lower or "rsen" in action_lower:
             return "RSEN validation result with plausibility decision and rationale"
         if "refine" in action_lower or "finalize" in action_lower:
@@ -829,13 +1080,15 @@ For prediction tasks, include at least these stages in order:
     def _extract_reflection_errors(self, reflection_text: str) -> List[str]:
         errors: List[str] = []
         for line in (reflection_text or "").splitlines():
-            striped = line.strip()
-            if striped.startswith("- "):
-                errors.append(striped[2:].strip())
-            elif striped.startswith("* "):
-                errors.append(striped[2:].strip())
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                errors.append(stripped[2:].strip())
+            elif stripped.startswith("* "):
+                errors.append(stripped[2:].strip())
+
         if not errors and reflection_text and "[APPROVED]" not in reflection_text:
             errors.append(reflection_text.strip())
+
         return errors
 
     def _store_reflection_issue_to_memory(
@@ -845,22 +1098,25 @@ For prediction tasks, include at least these stages in order:
         reflection_text: str,
         reflection_errors: List[str],
     ) -> None:
-        """
-        Best-effort persistence cho lỗi planning/reflection.
-        Để bám FR-P04 -> FR-P09.
-        """
         payload = {
             "type": "planning_reflection_issue",
             "query": query,
             "normalized_query_context": normalized_query_context,
             "reflection_errors": reflection_errors,
             "reflection_text": reflection_text,
-            "tags": ["planning", "reflection", "FR-P04", "FR-P05", "FR-P06", "FR-P07", "FR-P08", "FR-P09"],
+            "tags": [
+                "planning",
+                "reflection",
+                "FR-P04",
+                "FR-P05",
+                "FR-P06",
+                "FR-P07",
+                "FR-P08",
+                "FR-P09",
+            ],
         }
 
         stored = False
-
-        # Các kiểu memory có thể tồn tại tùy hệ thống
         memory_candidates = [
             getattr(self, "memory_store", None),
             getattr(self, "memory_agent", None),
@@ -900,21 +1156,20 @@ For prediction tasks, include at least these stages in order:
     # ─────────────────────────────────────────
 
     def _get_normalized_query_context(self, state: AgentState) -> Dict[str, Any]:
-        """
-        Ưu tiên lấy từ state.
-        Hỗ trợ nhiều key để dễ tích hợp với orchestrator mới.
-        """
         candidates = [
             state.get("normalized_query_context"),
-            state.get("context", {}).get("normalized_query_context") if isinstance(state.get("context"), dict) else None,
-            state.get("parameters", {}).get("normalized_query_context") if isinstance(state.get("parameters"), dict) else None,
+            state.get("context", {}).get("normalized_query_context")
+            if isinstance(state.get("context"), dict)
+            else None,
+            state.get("parameters", {}).get("normalized_query_context")
+            if isinstance(state.get("parameters"), dict)
+            else None,
         ]
 
         for item in candidates:
             if isinstance(item, dict) and item:
                 return item
 
-        # fallback rất nhẹ: tạo context tối thiểu từ query
         query = state.get("query", "")
         return {
             "original_query": query,
@@ -924,12 +1179,22 @@ For prediction tasks, include at least these stages in order:
             "time_range": None,
         }
 
-    def _infer_task_type(self, query: str, normalized_query_context: Optional[Dict[str, Any]] = None) -> str:
+    def _infer_task_type(
+        self,
+        query: str,
+        normalized_query_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        context = normalized_query_context or {}
+
+        direct = context.get("task_type")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip().lower()
+
         text = " ".join(
             str(x)
             for x in [
                 query or "",
-                _safe_json_dumps(normalized_query_context or {}),
+                _safe_json_dumps(context),
             ]
         ).lower()
 
@@ -943,7 +1208,12 @@ For prediction tasks, include at least these stages in order:
             "next week",
             "next 7 days",
             "next days",
+            "dự đoán",
+            "nguy cơ",
+            "rủi ro",
         ]
+
         if any(keyword in text for keyword in prediction_keywords):
             return "prediction"
+
         return "qa"

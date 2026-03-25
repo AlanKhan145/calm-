@@ -1,10 +1,10 @@
 """
 QueryNormalizerAgent — chuẩn hóa truy vấn thô thành context JSON chuẩn cho planner.
 
-Agent này phải chạy TRƯỚC planner.
+Agent này nên chạy TRƯỚC planner.
 
 Input:
-- query text thô từ user
+- query text thô từ user, có thể là tiếng Việt / tiếng Anh / pha trộn tự nhiên
 
 Output JSON chuẩn:
 - task_type
@@ -18,13 +18,15 @@ Output JSON chuẩn:
 - ambiguities
 
 Nguyên tắc:
-- Không hallucinate location/time.
+- Không hallucinate lat/lon hay time_range.
+- LLM chỉ dùng để hiểu câu và tách trường.
+- Tọa độ thật vẫn phải đến từ geocoder hoặc từ query coordinates.
 - Nếu mơ hồ hoặc resolve thất bại thì ghi vào ambiguities.
-- Có gọi geocoding + time_utils nếu được inject vào.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, time, timedelta
@@ -54,15 +56,17 @@ class QueryNormalizerAgent:
         - to_time_range(expression, ...)
         - parse_query_time(expression, ...)
 
-    Lưu ý:
-    - Nếu geocoder/time_utils không có hoặc không resolve được,
-      agent KHÔNG tự bịa ra location/time_range.
+    llm:
+        object optional, có thể hỗ trợ một trong các method:
+        - invoke(prompt)
+        - run(prompt)
+        - complete(prompt)
+        - generate(prompt)
     """
 
     _COORD_PATTERN = re.compile(
         r"(?P<lat>-?\d{1,2}(?:\.\d+)?)\s*[, ]\s*(?P<lon>-?\d{1,3}(?:\.\d+)?)"
     )
-
     _ISO_DATE_PATTERN = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
     _DMY_DATE_PATTERN = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")
 
@@ -70,11 +74,13 @@ class QueryNormalizerAgent:
         self,
         geocoder: Any | None = None,
         time_utils: Any | None = None,
+        llm: Any | None = None,
         timezone: str = "Asia/Bangkok",
         now_fn=None,
     ) -> None:
         self.geocoder = geocoder
         self.time_utils = time_utils
+        self.llm = llm
         self.timezone = timezone
         self.now_fn = now_fn or self._default_now
 
@@ -90,29 +96,44 @@ class QueryNormalizerAgent:
         ambiguities: list[dict[str, Any]] = []
 
         if not query:
-            return {
-                "task_type": "unknown",
-                "location_text": None,
-                "location_kind": "unknown",
-                "location_resolved": None,
-                "time_expression": None,
-                "time_range": None,
-                "prediction_target": None,
-                "requested_output": [],
-                "ambiguities": [
-                    {
-                        "field": "query",
-                        "reason": "empty_query",
-                        "message": "Query text is empty.",
-                    }
-                ],
-            }
+            return self._build_empty_result()
 
         task_type = self._infer_task_type(query)
         prediction_target = self._infer_prediction_target(query)
         requested_output = self._infer_requested_output(query)
 
-        location_text, location_kind, location_ambiguities = self._extract_location(query)
+        time_expression, time_expr_ambiguities = self._extract_time_expression(query)
+        ambiguities.extend(time_expr_ambiguities)
+
+        llm_parse = self._llm_extract_semantics(query)
+        if llm_parse is not None:
+            llm_ambiguities = llm_parse.pop("_ambiguities", None)
+            if isinstance(llm_ambiguities, list):
+                ambiguities.extend(llm_ambiguities)
+
+        if llm_parse:
+            task_type = self._coalesce_valid(
+                self._normalize_task_type(llm_parse.get("task_type")),
+                task_type,
+            )
+            prediction_target = self._coalesce_valid(
+                self._normalize_prediction_target(llm_parse.get("prediction_target")),
+                prediction_target,
+            )
+            requested_output = self._merge_unique(
+                requested_output,
+                self._normalize_requested_outputs(llm_parse.get("requested_output")),
+            )
+
+            llm_time_expression = llm_parse.get("time_expression")
+            if isinstance(llm_time_expression, str) and llm_time_expression.strip():
+                time_expression = llm_time_expression.strip()
+
+        location_text, location_kind, location_ambiguities = self._extract_location(
+            query=query,
+            llm_parse=llm_parse,
+            known_time_expression=time_expression,
+        )
         ambiguities.extend(location_ambiguities)
 
         location_resolved = None
@@ -123,15 +144,11 @@ class QueryNormalizerAgent:
             )
             ambiguities.extend(resolve_location_ambiguities)
 
-        time_expression, time_expr_ambiguities = self._extract_time_expression(query)
-        ambiguities.extend(time_expr_ambiguities)
-
         time_range = None
         if time_expression is not None:
             time_range, time_range_ambiguities = self._resolve_time_expression(time_expression)
             ambiguities.extend(time_range_ambiguities)
 
-        # Không hallucinate target nếu query chưa rõ là prediction gì
         if task_type == "prediction" and prediction_target is None:
             ambiguities.append(
                 {
@@ -154,6 +171,29 @@ class QueryNormalizerAgent:
         }
 
     # ------------------------------------------------------------------
+    # Empty result
+    # ------------------------------------------------------------------
+
+    def _build_empty_result(self) -> dict[str, Any]:
+        return {
+            "task_type": "unknown",
+            "location_text": None,
+            "location_kind": "unknown",
+            "location_resolved": None,
+            "time_expression": None,
+            "time_range": None,
+            "prediction_target": None,
+            "requested_output": [],
+            "ambiguities": [
+                {
+                    "field": "query",
+                    "reason": "empty_query",
+                    "message": "Query text is empty.",
+                }
+            ],
+        }
+
+    # ------------------------------------------------------------------
     # Core inference
     # ------------------------------------------------------------------
 
@@ -161,17 +201,22 @@ class QueryNormalizerAgent:
         q = query.lower()
 
         prediction_keywords = [
-            "predict", "prediction", "forecast", "dự đoán", "dự báo", "ước tính",
-            "risk", "rủi ro", "nguy cơ", "spread", "lan rộng",
+            "predict", "prediction", "forecast", "estimate", "project",
+            "dự đoán", "dự báo", "ước tính",
+            "risk", "rủi ro", "nguy cơ",
+            "spread", "lan rộng",
         ]
         monitoring_keywords = [
-            "monitor", "monitoring", "alert", "cảnh báo", "theo dõi",
+            "monitor", "monitoring", "alert", "watch",
+            "cảnh báo", "theo dõi", "giám sát",
         ]
         qa_keywords = [
-            "what", "why", "how", "giải thích", "là gì", "tại sao", "như thế nào",
+            "what", "why", "how", "when", "where",
+            "giải thích", "là gì", "tại sao", "như thế nào", "ở đâu", "khi nào",
         ]
         analysis_keywords = [
-            "analyze", "analysis", "phân tích", "compare", "so sánh", "đánh giá",
+            "analyze", "analysis", "compare", "evaluation", "assess",
+            "phân tích", "so sánh", "đánh giá",
         ]
 
         if any(k in q for k in monitoring_keywords):
@@ -189,7 +234,7 @@ class QueryNormalizerAgent:
 
         if any(k in q for k in ["spread forecast", "fire spread", "lan rộng", "cháy lan"]):
             return "fire_spread"
-        if any(k in q for k in ["risk map", "bản đồ rủi ro", "heatmap", "map"]):
+        if any(k in q for k in ["risk map", "bản đồ rủi ro", "heatmap"]):
             return "risk_map"
         if any(k in q for k in ["wildfire", "cháy rừng", "fire risk", "nguy cơ cháy", "rủi ro cháy"]):
             return "wildfire_risk"
@@ -202,9 +247,9 @@ class QueryNormalizerAgent:
         rules = [
             ("probability", ["probability", "xác suất"]),
             ("logit", ["logit"]),
-            ("risk_level", ["risk level", "mức rủi ro", "risk", "rủi ro"]),
+            ("risk_level", ["risk level", "mức rủi ro"]),
             ("confidence", ["confidence", "độ tin cậy"]),
-            ("risk_map", ["risk map", "bản đồ rủi ro", "heatmap", "map"]),
+            ("risk_map", ["risk map", "bản đồ rủi ro", "heatmap"]),
             ("spread_forecast", ["spread forecast", "fire spread", "lan rộng", "cháy lan"]),
         ]
 
@@ -212,23 +257,184 @@ class QueryNormalizerAgent:
             if any(k in q for k in keywords):
                 outputs.append(output_name)
 
-        # tránh duplicate, giữ thứ tự
-        seen = set()
-        unique_outputs = []
-        for item in outputs:
-            if item not in seen:
-                unique_outputs.append(item)
-                seen.add(item)
-        return unique_outputs
+        if "risk" in q or "rủi ro" in q or "nguy cơ" in q:
+            outputs.append("risk_level")
+
+        return self._unique_keep_order(outputs)
+
+    # ------------------------------------------------------------------
+    # LLM semantic extraction
+    # ------------------------------------------------------------------
+
+    def _llm_extract_semantics(self, query: str) -> dict[str, Any] | None:
+        if self.llm is None:
+            return None
+
+        prompt = self._build_llm_prompt(query)
+
+        try:
+            raw = self._call_llm(prompt)
+            payload = self._extract_json_object(raw)
+            if not isinstance(payload, dict):
+                return None
+
+            normalized = {
+                "task_type": self._normalize_task_type(payload.get("task_type")),
+                "prediction_target": self._normalize_prediction_target(payload.get("prediction_target")),
+                "location_text": self._normalize_llm_location_text(payload.get("location_text")),
+                "time_expression": self._normalize_optional_string(payload.get("time_expression")),
+                "requested_output": self._normalize_requested_outputs(payload.get("requested_output")),
+                "confidence": self._safe_float(payload.get("confidence")),
+            }
+
+            ambiguities: list[dict[str, Any]] = []
+
+            loc = normalized.get("location_text")
+            if isinstance(loc, str) and loc and len(loc.split()) > 12:
+                ambiguities.append(
+                    {
+                        "field": "location",
+                        "reason": "llm_location_too_long",
+                        "message": "LLM returned an overlong location candidate; falling back to rules if needed.",
+                        "raw": loc,
+                    }
+                )
+
+            normalized["_ambiguities"] = ambiguities
+            return normalized
+        except Exception as e:
+            logger.warning("QueryNormalizerAgent llm extraction failed: %s", e)
+            return None
+
+    def _build_llm_prompt(self, query: str) -> str:
+        return f"""
+You are a multilingual query normalizer for a wildfire and geospatial prediction system.
+
+The user may write in English, Vietnamese, or mixed language.
+Your job is to extract structured fields from the query.
+
+Return ONLY valid JSON. No markdown. No explanation.
+
+Schema:
+{{
+  "task_type": "prediction|monitoring|analysis|qa|unknown|null",
+  "prediction_target": "wildfire_risk|fire_spread|risk_map|unknown|null",
+  "location_text": "string|null",
+  "time_expression": "string|null",
+  "requested_output": ["risk_level"|"probability"|"confidence"|"risk_map"|"spread_forecast"|"logit"],
+  "confidence": 0.0
+}}
+
+Rules:
+- Understand English, Vietnamese, and mixed-language queries.
+- Separate location from time.
+- Never include time words inside location_text.
+- Keep location_text concise but complete.
+- Do NOT invent coordinates.
+- If uncertain, use null.
+- If the query asks for wildfire/fire risk prediction, prefer prediction target "wildfire_risk".
+- If the query asks about spread/lan rộng/cháy lan, prefer prediction target "fire_spread".
+- If the query asks for a map/heatmap/bản đồ rủi ro, include "risk_map" in requested_output.
+
+Examples:
+Query: "Predict wildfire risk for Central Valley California next 7 days"
+JSON:
+{{
+  "task_type": "prediction",
+  "prediction_target": "wildfire_risk",
+  "location_text": "Central Valley California",
+  "time_expression": "next 7 days",
+  "requested_output": ["risk_level"],
+  "confidence": 0.95
+}}
+
+Query: "Dự đoán nguy cơ cháy rừng ở Tây Nguyên 7 ngày tới"
+JSON:
+{{
+  "task_type": "prediction",
+  "prediction_target": "wildfire_risk",
+  "location_text": "Tây Nguyên",
+  "time_expression": "7 ngày tới",
+  "requested_output": ["risk_level"],
+  "confidence": 0.95
+}}
+
+Query:
+{query}
+""".strip()
+
+    def _call_llm(self, prompt: str) -> str:
+        method_names = ["invoke", "run", "complete", "generate"]
+        for name in method_names:
+            fn = getattr(self.llm, name, None)
+            if not callable(fn):
+                continue
+
+            result = fn(prompt)
+
+            if isinstance(result, str):
+                return result
+
+            content = getattr(result, "content", None)
+            if isinstance(content, str):
+                return content
+
+            text = getattr(result, "text", None)
+            if isinstance(text, str):
+                return text
+
+            generations = getattr(result, "generations", None)
+            if generations:
+                try:
+                    first = generations[0]
+                    if isinstance(first, list) and first:
+                        item = first[0]
+                        item_text = getattr(item, "text", None)
+                        if isinstance(item_text, str):
+                            return item_text
+                except Exception:
+                    pass
+
+        raise RuntimeError("No compatible LLM method found on injected llm object.")
+
+    def _extract_json_object(self, raw: str) -> dict[str, Any] | None:
+        if not isinstance(raw, str):
+            return None
+
+        raw = raw.strip()
+
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            return None
+
+        try:
+            obj = json.loads(match.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+
+        return None
 
     # ------------------------------------------------------------------
     # Location parsing + geocoding
     # ------------------------------------------------------------------
 
-    def _extract_location(self, query: str) -> tuple[str | None, str, list[dict[str, Any]]]:
+    def _extract_location(
+        self,
+        query: str,
+        llm_parse: dict[str, Any] | None = None,
+        known_time_expression: str | None = None,
+    ) -> tuple[str | None, str, list[dict[str, Any]]]:
         ambiguities: list[dict[str, Any]] = []
 
-        # 1) Ưu tiên coordinates rõ ràng
         coord_matches = list(self._COORD_PATTERN.finditer(query))
         valid_coords = []
         for match in coord_matches:
@@ -253,15 +459,31 @@ class QueryNormalizerAgent:
             )
             return None, "unknown", ambiguities
 
-        # 2) Thử bắt location text bằng pattern bảo thủ
+        llm_location = None
+        if isinstance(llm_parse, dict):
+            llm_location = llm_parse.get("location_text")
+
+        if isinstance(llm_location, str) and llm_location.strip():
+            cleaned = self._sanitize_location_text(
+                llm_location,
+                known_time_expression=known_time_expression,
+            )
+            if cleaned:
+                return cleaned, "place_name", ambiguities
+
+        query_wo_time = self._remove_time_phrases_for_location(
+            query,
+            known_time_expression=known_time_expression,
+        )
+
         candidate_patterns = [
-            r"\b(?:ở|tại|khu vực|vùng|quanh|gần)\s+(.+?)(?=$|[.;?!])",
-            r"\b(?:in|at|around|near|for)\s+(.+?)(?=$|[.;?!])",
+            r"\b(?:ở|tại|khu vực|vùng|quanh|gần|cho|cho khu vực)\s+(.+?)(?=$|[.;?!])",
+            r"\b(?:in|at|around|near|for|over|across)\s+(.+?)(?=$|[.;?!])",
         ]
 
         candidates: list[str] = []
         for pattern in candidate_patterns:
-            for m in re.finditer(pattern, query, flags=re.IGNORECASE):
+            for m in re.finditer(pattern, query_wo_time, flags=re.IGNORECASE):
                 raw = (m.group(1) or "").strip()
                 cleaned = self._trim_location_candidate(raw)
                 if cleaned:
@@ -283,7 +505,107 @@ class QueryNormalizerAgent:
             )
             return None, "unknown", ambiguities
 
+        direct = self._extract_direct_place_candidate(query_wo_time)
+        if direct:
+            return direct, "place_name", ambiguities
+
         return None, "unknown", ambiguities
+
+    def _remove_time_phrases_for_location(
+        self,
+        query: str,
+        known_time_expression: str | None = None,
+    ) -> str:
+        q = f" {query} "
+
+        if known_time_expression:
+            q = re.sub(re.escape(known_time_expression), " ", q, flags=re.IGNORECASE)
+
+        time_patterns = [
+            r"\bnext\s+\d+\s+(?:day|days|hour|hours|week|weeks|month|months|year|years)\b",
+            r"\bthis\s+(?:week|month|year)\b",
+            r"\bnext\s+(?:week|month|year)\b",
+            r"\btoday\b",
+            r"\btomorrow\b",
+            r"\byesterday\b",
+            r"\btonight\b",
+            r"\bthis\s+evening\b",
+            r"\bthis\s+afternoon\b",
+            r"\b\d+\s+ngày\s+tới\b",
+            r"\b\d+\s+giờ\s+tới\b",
+            r"\btuần\s+này\b",
+            r"\btuần\s+tới\b",
+            r"\btháng\s+này\b",
+            r"\btháng\s+tới\b",
+            r"\bnăm\s+này\b",
+            r"\bnăm\s+tới\b",
+            r"\bhôm\s+nay\b",
+            r"\bngày\s+mai\b",
+            r"\bhôm\s+qua\b",
+            r"\btối\s+nay\b",
+            r"\bchiều\s+nay\b",
+        ]
+
+        for pattern in time_patterns:
+            q = re.sub(pattern, " ", q, flags=re.IGNORECASE)
+
+        return re.sub(r"\s+", " ", q).strip()
+
+    def _extract_direct_place_candidate(self, query: str) -> str | None:
+        q = query.strip(" \t\n\"'“”‘’,:-")
+        if not q:
+            return None
+
+        q = re.sub(
+            r"^(predict|forecast|estimate|analyze|show|give|compute|calculate|monitor)\s+",
+            "",
+            q,
+            flags=re.IGNORECASE,
+        )
+        q = re.sub(
+            r"^(dự đoán|dự báo|ước tính|phân tích|cho biết|theo dõi|giám sát)\s+",
+            "",
+            q,
+            flags=re.IGNORECASE,
+        )
+        q = re.sub(
+            r"^(wildfire risk|fire risk|risk map|spread forecast|wildfire|fire spread)\s+",
+            "",
+            q,
+            flags=re.IGNORECASE,
+        )
+        q = re.sub(
+            r"^(nguy cơ cháy rừng|rủi ro cháy rừng|bản đồ rủi ro|cháy rừng|cháy lan)\s+",
+            "",
+            q,
+            flags=re.IGNORECASE,
+        )
+
+        q = q.strip(" \t\n\"'“”‘’,:-")
+        q = self._trim_location_candidate(q)
+
+        if not q:
+            return None
+
+        banned_fragments = {
+            "wildfire risk",
+            "fire risk",
+            "risk map",
+            "spread forecast",
+            "prediction",
+            "forecast",
+            "dự đoán",
+            "dự báo",
+            "nguy cơ cháy",
+            "rủi ro cháy",
+        }
+        if q.lower() in banned_fragments:
+            return None
+
+        if len(q.split()) > 8:
+            return None
+
+        return q
 
     def _trim_location_candidate(self, text: str) -> str | None:
         if not text:
@@ -291,13 +613,17 @@ class QueryNormalizerAgent:
 
         candidate = text.strip(" \t\n\"'“”‘’,:-")
 
-        # cắt đuôi nếu location bị dính time phrase
         stop_markers = [
             " hôm nay", " ngày mai", " hôm qua",
-            " tuần này", " tuần tới", " tháng này", " tháng tới",
-            " this week", " next week", " today", " tomorrow", " yesterday",
-            " từ ", " đến ", " between ", " from ", " vào ", " lúc ", " during ",
+            " tuần này", " tuần tới", " tháng này", " tháng tới", " năm nay", " năm tới",
+            " 24 giờ tới", " 48 giờ tới", " 7 ngày tới",
+            " this week", " next week", " this month", " next month", " this year", " next year",
+            " today", " tomorrow", " yesterday", " tonight",
+            " next 24 hours", " next 48 hours", " next 7 days",
+            " from ", " to ", " between ", " and ", " during ",
+            " từ ", " đến ", " vào ", " lúc ", " trong ",
         ]
+
         lowered = candidate.lower()
         cut_index = None
         for marker in stop_markers:
@@ -308,10 +634,53 @@ class QueryNormalizerAgent:
         if cut_index is not None:
             candidate = candidate[:cut_index].strip(" \t\n\"'“”‘’,:-")
 
-        # loại bỏ chuỗi quá chung chung
         if not candidate:
             return None
+
         if candidate.lower() in {"đó", "đây", "there", "here", "khu vực đó"}:
+            return None
+
+        return candidate
+
+    def _sanitize_location_text(
+        self,
+        text: str,
+        known_time_expression: str | None = None,
+    ) -> str | None:
+        if not text or not isinstance(text, str):
+            return None
+
+        candidate = text.strip(" \t\n\"'“”‘’,:-")
+
+        if known_time_expression:
+            candidate = re.sub(
+                re.escape(known_time_expression),
+                " ",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+
+        candidate = self._trim_location_candidate(candidate)
+        if not candidate:
+            return None
+
+        banned = {
+            "wildfire risk",
+            "fire risk",
+            "next 7 days",
+            "this week",
+            "today",
+            "tomorrow",
+            "dự đoán",
+            "dự báo",
+            "7 ngày tới",
+            "tuần này",
+            "tuần tới",
+        }
+        if candidate.lower() in banned:
+            return None
+
+        if len(candidate.split()) > 8:
             return None
 
         return candidate
@@ -355,6 +724,8 @@ class QueryNormalizerAgent:
                 "name": None,
                 "lat": lat,
                 "lon": lon,
+                "bbox": None,
+                "resolution_kind": "exact_coordinates",
             }, ambiguities
 
         if location_kind != "place_name":
@@ -386,10 +757,15 @@ class QueryNormalizerAgent:
 
         if isinstance(geocode_result, list):
             normalized_candidates = [
-                c for c in (self._normalize_geocode_candidate(x) for x in geocode_result) if c is not None
+                c for c in (self._normalize_geocode_candidate(x) for x in geocode_result)
+                if c is not None
             ]
+
             if len(normalized_candidates) == 1:
-                return normalized_candidates[0], ambiguities
+                normalized = normalized_candidates[0]
+                ambiguities.extend(self._post_validate_resolved_location(location_text, normalized))
+                return normalized, ambiguities
+
             if len(normalized_candidates) > 1:
                 ambiguities.append(
                     {
@@ -424,7 +800,71 @@ class QueryNormalizerAgent:
             )
             return None, ambiguities
 
+        ambiguities.extend(self._post_validate_resolved_location(location_text, normalized))
         return normalized, ambiguities
+
+    def _post_validate_resolved_location(
+        self,
+        location_text: str,
+        resolved: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        ambiguities: list[dict[str, Any]] = []
+
+        if not resolved or not isinstance(resolved, dict):
+            return ambiguities
+
+        if self._is_region_like_location_text(location_text):
+            if self._is_point_sized_bbox(resolved.get("bbox")):
+                resolved["resolution_kind"] = "region_centroid_fallback"
+                resolved["needs_region_bbox"] = True
+
+                ambiguities.append(
+                    {
+                        "field": "location",
+                        "reason": "region_resolved_as_point",
+                        "message": (
+                            "Location appears to describe a large region, but geocoder returned "
+                            "a point-sized result or extremely small bbox."
+                        ),
+                        "raw": location_text,
+                        "resolved_name": resolved.get("name"),
+                        "bbox": resolved.get("bbox"),
+                    }
+                )
+            else:
+                resolved["resolution_kind"] = "region_bbox"
+
+        return ambiguities
+
+    def _is_region_like_location_text(self, text: str) -> bool:
+        if not text or not isinstance(text, str):
+            return False
+
+        t = text.lower().strip()
+
+        region_markers = [
+            "valley", "delta", "basin", "plateau", "region", "area", "highlands", "lowlands",
+            "cao nguyên", "đồng bằng", "thung lũng", "vùng", "khu vực", "miền", "lưu vực",
+            "tây nguyên",
+        ]
+        return any(marker in t for marker in region_markers)
+
+    def _is_point_sized_bbox(self, bbox: Any, max_span_deg: float = 0.05) -> bool:
+        if not isinstance(bbox, dict):
+            return True
+
+        min_lat = self._safe_float(bbox.get("min_lat"))
+        max_lat = self._safe_float(bbox.get("max_lat"))
+        min_lon = self._safe_float(bbox.get("min_lon"))
+        max_lon = self._safe_float(bbox.get("max_lon"))
+
+        if None in (min_lat, max_lat, min_lon, max_lon):
+            return True
+
+        lat_span = abs(max_lat - min_lat)
+        lon_span = abs(max_lon - min_lon)
+
+        return lat_span <= max_span_deg and lon_span <= max_span_deg
 
     def _call_geocoder(self, location_text: str) -> Any:
         method_names = ["resolve", "geocode", "resolve_location", "lookup"]
@@ -460,6 +900,7 @@ class QueryNormalizerAgent:
                 candidate.get("lat")
                 or candidate.get("latitude")
                 or (candidate.get("coords") or {}).get("lat")
+                or (candidate.get("center") or {}).get("lat")
             )
             lon = self._safe_float(
                 candidate.get("lon")
@@ -467,10 +908,14 @@ class QueryNormalizerAgent:
                 or candidate.get("longitude")
                 or (candidate.get("coords") or {}).get("lon")
                 or (candidate.get("coords") or {}).get("lng")
+                or (candidate.get("center") or {}).get("lon")
+                or (candidate.get("center") or {}).get("lng")
             )
 
             if lat is None or lon is None:
                 return None
+
+            bbox = self._extract_bbox(candidate)
 
             return {
                 "source": "geocoder",
@@ -478,12 +923,14 @@ class QueryNormalizerAgent:
                 "name": candidate.get("name") or candidate.get("display_name") or candidate.get("label"),
                 "lat": lat,
                 "lon": lon,
+                "bbox": bbox,
                 "country": candidate.get("country"),
                 "admin1": candidate.get("admin1") or candidate.get("state") or candidate.get("province"),
                 "admin2": candidate.get("admin2") or candidate.get("county") or candidate.get("district"),
+                "resolution_kind": "point_or_bbox",
+                "needs_region_bbox": False,
             }
 
-        # object style
         lat = self._safe_float(getattr(candidate, "lat", None) or getattr(candidate, "latitude", None))
         lon = self._safe_float(
             getattr(candidate, "lon", None)
@@ -493,16 +940,63 @@ class QueryNormalizerAgent:
         if lat is None or lon is None:
             return None
 
+        bbox = self._extract_bbox(candidate)
+
         return {
             "source": "geocoder",
             "raw_text": None,
             "name": getattr(candidate, "name", None) or getattr(candidate, "display_name", None),
             "lat": lat,
             "lon": lon,
+            "bbox": bbox,
             "country": getattr(candidate, "country", None),
             "admin1": getattr(candidate, "admin1", None) or getattr(candidate, "state", None),
             "admin2": getattr(candidate, "admin2", None) or getattr(candidate, "district", None),
+            "resolution_kind": "point_or_bbox",
+            "needs_region_bbox": False,
         }
+
+    def _extract_bbox(self, candidate: Any) -> dict[str, float] | None:
+        if isinstance(candidate, dict):
+            bbox = candidate.get("bbox") or candidate.get("boundingbox") or candidate.get("bounds")
+            return self._normalize_bbox(bbox)
+
+        bbox = (
+            getattr(candidate, "bbox", None)
+            or getattr(candidate, "boundingbox", None)
+            or getattr(candidate, "bounds", None)
+        )
+        return self._normalize_bbox(bbox)
+
+    def _normalize_bbox(self, bbox: Any) -> dict[str, float] | None:
+        if bbox is None:
+            return None
+
+        if isinstance(bbox, dict):
+            min_lat = self._safe_float(bbox.get("min_lat") or bbox.get("south") or bbox.get("miny"))
+            max_lat = self._safe_float(bbox.get("max_lat") or bbox.get("north") or bbox.get("maxy"))
+            min_lon = self._safe_float(bbox.get("min_lon") or bbox.get("west") or bbox.get("minx"))
+            max_lon = self._safe_float(bbox.get("max_lon") or bbox.get("east") or bbox.get("maxx"))
+            if None not in (min_lat, max_lat, min_lon, max_lon):
+                return {
+                    "min_lat": min_lat,
+                    "max_lat": max_lat,
+                    "min_lon": min_lon,
+                    "max_lon": max_lon,
+                }
+
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            values = [self._safe_float(x) for x in bbox[:4]]
+            if all(v is not None for v in values):
+                south, north, west, east = values
+                return {
+                    "min_lat": south,
+                    "max_lat": north,
+                    "min_lon": west,
+                    "max_lon": east,
+                }
+
+        return None
 
     # ------------------------------------------------------------------
     # Time parsing + time_utils
@@ -511,13 +1005,11 @@ class QueryNormalizerAgent:
     def _extract_time_expression(self, query: str) -> tuple[str | None, list[dict[str, Any]]]:
         ambiguities: list[dict[str, Any]] = []
 
-        # Ưu tiên gọi time_utils.extract_* nếu có
         if self.time_utils is not None:
             extracted = self._call_time_expression_extractor(query)
             if isinstance(extracted, str) and extracted.strip():
                 return extracted.strip(), ambiguities
 
-        # 1) range tường minh: từ ... đến ... / from ... to ... / between ... and ...
         range_patterns = [
             r"\btừ\s+(.+?)\s+đến\s+(.+?)(?=$|[.;?!])",
             r"\bfrom\s+(.+?)\s+to\s+(.+?)(?=$|[.;?!])",
@@ -545,15 +1037,14 @@ class QueryNormalizerAgent:
             )
             return None, ambiguities
 
-        # 2) relative / explicit đơn
         candidates: list[str] = []
 
         relative_markers = [
             "hôm nay", "ngày mai", "hôm qua",
-            "tuần này", "tuần tới", "tháng này", "tháng tới",
+            "tuần này", "tuần tới", "tháng này", "tháng tới", "năm nay", "năm tới",
             "24 giờ tới", "48 giờ tới", "7 ngày tới",
             "today", "tomorrow", "yesterday",
-            "this week", "next week", "this month", "next month",
+            "this week", "next week", "this month", "next month", "this year", "next year",
             "next 24 hours", "next 48 hours", "next 7 days",
         ]
         lowered = query.lower()
@@ -591,14 +1082,12 @@ class QueryNormalizerAgent:
         if not time_expression:
             return None, ambiguities
 
-        # Ưu tiên gọi time_utils
         if self.time_utils is not None:
             resolved = self._call_time_resolver(time_expression)
             normalized = self._normalize_time_range(resolved)
             if normalized is not None:
                 return normalized, ambiguities
 
-        # fallback nội bộ: chỉ parse những gì chắc chắn
         parsed = self._parse_time_expression_locally(time_expression)
         if parsed is not None:
             return parsed, ambiguities
@@ -640,7 +1129,6 @@ class QueryNormalizerAgent:
             if not callable(fn):
                 continue
 
-            # thử một vài signature phổ biến
             for call in (
                 lambda: fn(expression, reference_time=now, timezone=self.timezone),
                 lambda: fn(expression, now=now, timezone=self.timezone),
@@ -697,7 +1185,6 @@ class QueryNormalizerAgent:
         expr = expression.strip().lower()
         now = self.now_fn()
 
-        # explicit range
         explicit_range = self._parse_explicit_range(expression)
         if explicit_range is not None:
             return {
@@ -707,7 +1194,6 @@ class QueryNormalizerAgent:
                 "source": "local_parser",
             }
 
-        # single explicit date
         single_date = self._parse_single_date_token(expression)
         if single_date is not None:
             start = datetime.combine(single_date.date(), time.min, tzinfo=now.tzinfo)
@@ -719,7 +1205,6 @@ class QueryNormalizerAgent:
                 "source": "local_parser",
             }
 
-        # relative
         if expr in {"hôm nay", "today"}:
             start = datetime.combine(now.date(), time.min, tzinfo=now.tzinfo)
             end = start + timedelta(days=1)
@@ -822,6 +1307,83 @@ class QueryNormalizerAgent:
         return None
 
     # ------------------------------------------------------------------
+    # Normalization helpers
+    # ------------------------------------------------------------------
+
+    def _normalize_task_type(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip().lower()
+        allowed = {"prediction", "monitoring", "analysis", "qa", "unknown"}
+        return value if value in allowed else None
+
+    def _normalize_prediction_target(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip().lower()
+        aliases = {
+            "wildfire_risk": "wildfire_risk",
+            "fire_risk": "wildfire_risk",
+            "risk": "wildfire_risk",
+            "fire_spread": "fire_spread",
+            "spread": "fire_spread",
+            "risk_map": "risk_map",
+            "map": "risk_map",
+            "unknown": None,
+        }
+        return aliases.get(value, None)
+
+    def _normalize_requested_outputs(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            items = [value]
+        elif isinstance(value, (list, tuple)):
+            items = [x for x in value if isinstance(x, str)]
+        else:
+            return []
+
+        aliases = {
+            "risk_level": "risk_level",
+            "risk": "risk_level",
+            "probability": "probability",
+            "confidence": "confidence",
+            "risk_map": "risk_map",
+            "map": "risk_map",
+            "spread_forecast": "spread_forecast",
+            "fire_spread": "spread_forecast",
+            "logit": "logit",
+        }
+
+        out: list[str] = []
+        for item in items:
+            key = item.strip().lower()
+            normalized = aliases.get(key)
+            if normalized:
+                out.append(normalized)
+
+        return self._unique_keep_order(out)
+
+    def _normalize_llm_location_text(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    def _normalize_optional_string(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    def _coalesce_valid(self, preferred: Any, fallback: Any) -> Any:
+        return preferred if preferred is not None else fallback
+
+    def _merge_unique(self, base: list[str], extra: list[str]) -> list[str]:
+        return self._unique_keep_order((base or []) + (extra or []))
+
+    # ------------------------------------------------------------------
     # Utils
     # ------------------------------------------------------------------
 
@@ -857,6 +1419,8 @@ class QueryNormalizerAgent:
         seen = set()
         out = []
         for item in items:
+            if not isinstance(item, str):
+                continue
             norm = item.strip()
             if not norm:
                 continue

@@ -45,16 +45,8 @@ class RouterAgent:
     def __init__(self, llm, config: dict | None = None) -> None:
         self.llm = llm
         self.config = config or {}
+        # Tín hiệu chi tiết nằm ở calm.utils.intent_hints (tránh substring "risk" → prediction nhầm).
         self._fallback_keywords = {
-            "prediction": {
-                "predict",
-                "forecast",
-                "risk",
-                "detect",
-                "likelihood",
-                "next week",
-                "next days",
-            },
             "qa": {
                 "what",
                 "why",
@@ -126,37 +118,44 @@ class RouterAgent:
         """Fallback dựa trên plan action/agent và query keywords."""
         q_lower = query.lower()
 
+        # Duyệt toàn bộ plan: retrieve thường đứng trước predict — không được trả QA sớm.
+        plan_pred = False
+        plan_qa = False
         for step in (plan_steps or []):
             action = str(step.get("action", "")).lower()
             agent = str(step.get("agent", "")).lower()
-
             if any(w in action or w in agent for w in ["predict", "forecast", "model", "run_model"]):
-                return TaskRouting(
-                    task_type="prediction",
-                    confidence=0.7,
-                    required_artifacts=["prediction"],
-                    next_steps=["Run prediction workflow based on planned model step."],
-                    reasoning="From plan action/agent",
-                )
-
+                plan_pred = True
             if any(w in action or w in agent for w in ["retrieve", "web_search", "qa", "compile_report"]):
-                return TaskRouting(
-                    task_type="qa",
-                    confidence=0.7,
-                    required_artifacts=["evidence"],
-                    next_steps=["Retrieve evidence and answer the question."],
-                    reasoning="From plan action/agent",
-                )
+                plan_qa = True
 
-        for w in self._fallback_keywords["prediction"]:
-            if w in q_lower:
-                return TaskRouting(
-                    task_type="prediction",
-                    confidence=0.6,
-                    required_artifacts=["prediction"],
-                    next_steps=["Run prediction pipeline."],
-                    reasoning=f"Keyword: {w}",
-                )
+        if plan_pred:
+            return TaskRouting(
+                task_type="prediction",
+                confidence=0.7,
+                required_artifacts=["prediction"],
+                next_steps=["Run prediction workflow based on planned model step."],
+                reasoning="From plan action/agent",
+            )
+        if plan_qa:
+            return TaskRouting(
+                task_type="qa",
+                confidence=0.7,
+                required_artifacts=["evidence"],
+                next_steps=["Retrieve evidence and answer the question."],
+                reasoning="From plan action/agent",
+            )
+
+        from calm.utils.intent_hints import query_suggests_prediction
+
+        if query_suggests_prediction(query):
+            return TaskRouting(
+                task_type="prediction",
+                confidence=0.65,
+                required_artifacts=["prediction"],
+                next_steps=["Run prediction pipeline."],
+                reasoning="Heuristic: forecast/predict/risk-window patterns in query",
+            )
 
         for w in self._fallback_keywords["qa"]:
             if w in q_lower:

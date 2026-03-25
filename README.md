@@ -1,294 +1,233 @@
 # CALM — Adaptive Multimodal Wildfire Monitoring
 
-**Hệ thống AI giám sát cháy rừng thích ứng đa phương thức**, sử dụng kiến trúc agentic (URSA) để đánh giá rủi ro, thu thập dữ liệu đa nguồn và trả lời câu hỏi dựa trên bằng chứng.
+**CALM** là hệ thống agentic cho giám sát và phân tích cháy rừng: trả lời câu hỏi có trích dẫn (QA), ước lượng rủi ro / dự báo (prediction) với kiểm chứng RSEN, và thu thập dữ liệu đa nguồn (Google Earth Engine, Copernicus CDS, web, arXiv).
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
 ## Tổng quan
 
-CALM kết hợp **plan-driven execution**, **RSEN** (Reflexive Structured Experts Network) và **Evidence Evaluator** để:
+Điểm vào chính là **`CALMOrchestrator.run(query)`** (hoặc CLI `calm run`, hoặc `python main.py`). Hệ thống:
 
-- **Planning** → Phân rã query thành kế hoạch JSON có cấu trúc
-- **Routing** → RouterAgent xác định task type (QA / Prediction)
-- **Execution** → DataKnowledgeAgent, PredictionReasoningAgent, WildfireQAAgent chạy theo plan
-- **Validation** → RSEN xác thực dự đoán bằng chuyên gia thời tiết + địa lý
-- **Evaluation** → LLM-as-a-Judge chấm 5 tiêu chí chất lượng
+1. **Chuẩn hoá ngữ cảnh** từ câu hỏi (địa điểm gợi ý, tọa độ trong text, khoảng thời gian; geocode nếu có tool; `resolve_time_range` — không ghi ngày thì mặc định hôm nay).
+2. **Lập kế hoạch** — `PlanningAgent` (URSA) sinh plan dạng các bước JSON.
+3. **Định tuyến** — `RouterAgent`: `qa` | `prediction` | `hybrid`. `hybrid` được **gom vào pipeline prediction** (cần cả bằng chứng và output mô hình).
+4. **Thực thi** theo nhánh:
+   - **Prediction:** pipeline riêng `normalize → retrieve → build_features → predict → validate (RSEN) → refine` (refine khi dữ liệu / validation yếu); **không** chạy prediction qua `ExecutionAgent` để tránh thiếu bướcs và refinement.
+   - **QA:** hoặc `_qa_pipeline` (retrieve + `WildfireQAAgent`), hoặc `_run_plan_driven` qua `ExecutionAgent` khi có plan và executor.
+5. **Bộ nhớ** — lưu episode / short-term qua `MemoryAgent` + Chroma (nếu cấu hình).
+
+Heuristic định tuyến khi LLM thiếu ổn định nằm ở `calm/utils/intent_hints.py` (tránh nhầm câu hỏi “risk” chung chung với tác vụ dự báo).
 
 ### Điểm mạnh
 
 | Tính năng | Mô tả |
 |-----------|--------|
-| **Plan-driven** | PlanningAgent → RouterAgent → ExecutionAgent; không còn pipeline cứng |
-| **SeasFire integration** | Load seasfire-ml checkpoint; heuristic fallback từ met_data khi không có features |
-| **Geocoding** | Chỉ cần địa chỉ văn bản (California, Amazon); tool tự tìm tọa độ |
-| **Time default** | Không chỉ định ngày → mặc định hôm nay |
-| **Step prompt** | Mỗi step có prompt riêng cho executor |
-| **Dedup** | Tránh thu thập trùng theo location + time_range |
-| **Safety check** | Mọi lệnh tool qua SafetyChecker trước khi gọi |
+| Hai pipeline rõ ràng | QA vs prediction tách luồng; prediction có validate + refine |
+| SeasFire (tùy chọn) | Checkpoint GRU qua `SeasFireModelRunner`; thiếu model / feature → heuristic có kiểm soát |
+| Đa nguồn dữ liệu | GEE, Copernicus, tìm kiếm web, arXiv; geocoding cho địa chỉ tự nhiên |
+| RSEN | Hai chuyên gia (khí tượng / địa lý) song song → điều phối → Plausible / Implausible |
+| Safety | `SafetyChecker` trước khi gọi tool (tùy luồng) |
+| Đánh giá chất lượng | `EvaluatorAgent` — LLM chấm nhiều tiêu chí (tùy dùng) |
 
 ---
 
-## Cài đặt nhanh
+## Cài đặt
 
-### 1. Clone và cài đặt
+### 1. Clone và môi trường
 
 ```bash
-git clone https://github.com/viethungvu1998/calm.git
-cd calm
+git clone <url-repo-calms của bạn>
+cd <thư-mục-repo>    # thường là thư mục chứa pyproject.toml và src/calm/
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-# hoặc cài editable package:
 pip install -e .
 ```
 
-#### Cài PyTorch CPU-only (máy không có GPU)
-
-Nếu bạn chạy trên máy không có CUDA/GPU, cài lại PyTorch CPU-only trước khi chạy demo:
+### 2. PyTorch CPU-only (máy không GPU)
 
 ```bash
-# Linux / Windows
 pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
-```
-
-Sau đó cài lại dependencies của CALM:
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 2. Biến môi trường
+### 3. Biến môi trường
 
-Tạo `.env` hoặc export:
+Sao chép `.env.example` → `.env` và điền tối thiểu:
 
 ```bash
-# Bắt buộc: chọn một
-OPENROUTER_API_KEY=sk-or-v1-...
+# Một trong hai (bắt buộc cho LLM)
+OPENROUTER_API_KEY=...
 # hoặc
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=...
 
-# Tùy chọn
-GEE_PROJECT_ID=your-project
-COPERNICUS_API_KEY=your-key
-SEASFIRE_ML_PATH=/path/to/seasfire-ml    # Cho SeasFire model
-SEASFIRE_DATASET_PATH=/path/to/data/train # Cho feature builder (optional)
+# Tùy chọn — bật tool tương ứng
+GEE_PROJECT_ID=...
+COPERNICUS_API_KEY=...
+SEASFIRE_ML_PATH=/path/to/seasfire-ml
+SEASFIRE_DATASET_PATH=/path/to/datacube   # nếu dùng feature builder đầy đủ
 ```
 
-### 3. Chạy demo
+Chi tiết thêm trong `.env.example`.
+
+### 4. Chạy nhanh
 
 ```bash
 python main.py
-# hoặc
+# hoặc (sau pip install -e .)
 calm run "What causes wildfires in the Amazon?"
-calm run "Predict wildfire risk for California next 7 days"
+calm run "Predict wildfire risk for California over the next 7 days"
 ```
+
+Notebook kiểm thử end-to-end: **`test.ipynb`** (mở kernel từ thư mục repo để cell setup tự nhận `CALM_DIR`).
 
 ---
 
-## Luồng thực thi
+## Luồng `CALMOrchestrator.run` (thực tế trong code)
 
 ```
 Query
   │
   ▼
-PlanningAgent (Generator → Reflector → Formalizer)
-  │  → plan JSON: steps với action, agent, prompt, parameters
-  ▼
-RouterAgent (task_type: qa | prediction | hybrid)
+_normalize_query_context (text, location hint, coordinates, time_range)
   │
   ▼
-ExecutionAgent (chạy từng step)
+PlanningAgent → plan_steps (JSON)
   │
-  ├─ data_knowledge → DataKnowledgeAgent.retrieve()
-  │    GEE, Copernicus CDS, Web, ArXiv; GeocodingTool cho địa chỉ
+  ▼
+RouterAgent → task_type: qa | prediction | hybrid
+              (hybrid → xử lý như prediction)
   │
-  ├─ prediction → PredictionReasoningAgent.predict()
-  │    SeasFireModelRunner (checkpoint) hoặc heuristic (met_data)
+  ├─ prediction ──► Prediction pipeline
+  │                   retrieve (DataKnowledgeAgent)
+  │                   → met_data / spatial_data
+  │                   → PredictionReasoningAgent.predict
+  │                   → RSEN.validate
+  │                   → refine (re-query / mở rộng time / downgrade confidence nếu cần)
   │
-  ├─ qa → WildfireQAAgent.invoke()
-  │    Evidence Evaluator → ChromaDB retrieval → trả lời
+  └─ qa ──────────► Nếu có ExecutionAgent + plan_steps: plan-driven execution
+        hoặc       Ngược lại: QA pipeline (retrieve + WildfireQAAgent)
   │
-  └─ rsen → RSENModule.validate()
-       Weather Analyst + Geo Analyst (song song) → Plausible/Implausible
+  ▼
+MemoryAgent (episode + short-term) nếu có
 ```
+
+`ExecutionAgent` vẫn dùng cho **plan-driven QA** và các bước tổng quát; **không** thay thế pipeline prediction ở trên.
 
 ---
 
-## Cấu trúc dự án
+## Cấu trúc repo (rút gọn)
 
 ```
-calm/
 ├── configs/
-│   └── example.yaml              # Cấu hình mẫu
+│   └── example.yaml          # Cấu hình mẫu (agent_config, prediction checkpoint, …)
 ├── src/calm/
-│   ├── orchestrator.py           # CALMOrchestrator — điểm vào chính
-│   ├── agents/
-│   │   ├── planning_agent.py     # Phân rã query → plan JSON
-│   │   ├── router_agent.py       # Task routing (LLM + keyword fallback)
-│   │   ├── execution_agent.py    # Thực thi từng step
-│   │   ├── data_knowledge_agent.py # GEE, CDS, Web, ArXiv
-│   │   ├── prediction_reasoning_agent.py
-│   │   ├── qa_agent.py           # WildfireQAAgent + Evidence Evaluator
-│   │   ├── rsen_module.py        # Weather + Geo analysts
-│   │   └── evaluator_agent.py    # LLM-as-a-Judge
-│   ├── artifact/
-│   │   ├── seasfire_runner.py    # Load SeasFire checkpoint, heuristic
-│   │   ├── feature_builder.py    # (lat,lon,time) → tensor
-│   │   ├── model_runner.py       # SeasFireModelRunner adapter
-│   │   └── prediction_store.py   # Cache predictions
-│   ├── tools/
-│   │   ├── geocoding.py          # Địa chỉ → lat, lon
-│   │   ├── earth_engine.py
-│   │   ├── copernicus.py
-│   │   ├── web_search.py
-│   │   └── safety_check.py
-│   ├── schemas/
-│   │   └── contracts.py          # PlanStep, TaskRouting, ...
-│   ├── utils/
-│   │   └── time_utils.py         # resolve_time_range, default today
-│   └── memory/
-│       └── chroma_store.py
-├── examples/
-│   ├── 01_planning.py
-│   ├── 02_prediction_rsen.py
-│   ├── 03_wildfire_qa.py
-│   └── 04_full_pipeline.py
-├── calm_demo.ipynb               # Demo đầy đủ
-└── main.py
+│   ├── orchestrator.py       # CALMOrchestrator
+│   ├── cli/                  # Typer: calm run | calm plan | calm version
+│   ├── agents/               # Planning, Router, Execution, Data, QA, Prediction, RSEN, Memory, Evaluator, …
+│   ├── artifact/             # SeasFire runner, feature builder, model_runner, …
+│   ├── tools/                # earth_engine, copernicus, web_search, geocoding, arxiv, safety_check, …
+│   ├── schemas/              # contracts, query_context, …
+│   ├── prompt_library/       # Prompt theo module
+│   ├── memory/               # chroma_store, reranker
+│   └── utils/                # env_loader, time_utils, intent_hints, …
+├── test.ipynb                  # Kiểm tra từng agent + luồng orchestrator
+├── main.py                   # Demo 2 query: QA + prediction
+├── Dockerfile
+├── requirements.txt
+└── pyproject.toml            # package tên `calm`, script entry: calm
 ```
 
 ---
 
-## Ví dụ sử dụng
-
-### Orchestrator — auto-routing
+## Ví dụ Python
 
 ```python
-from calm.utils.env_loader import load_env
-load_env()
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path("src").resolve()))
 
+from calm.utils.env_loader import load_env
+load_env(Path(".env"))
+
+from langchain_openai import ChatOpenAI
 from calm.memory.chroma_store import ChromaMemoryStore
 from calm.orchestrator import CALMOrchestrator
-from langchain_openai import ChatOpenAI  # hoặc ChatOpenRouter
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
 memory = ChromaMemoryStore(collection_name="calm", persist_directory=".chroma")
-orc = CALMOrchestrator.from_llm(llm=llm, memory_store=memory)
 
-# QA
-result = orc.run("What causes wildfires in the Amazon?")
-print(result["answer"], result["citations"])
+# from_llm gắn sẵn tool mặc định (GEE, Copernicus, web, arXiv, geocoding) nếu không truyền
+orc = CALMOrchestrator.from_llm(llm=llm, memory_store=memory, tools={}, config={})
 
-# Prediction
-result = orc.run("Predict wildfire risk for California next 7 days")
-print(result["risk_level"], result["decision"], result["rationale"])
+r = orc.run("What causes wildfires in the Amazon?")
+print(r["task_type"], r.get("answer", "")[:200], r.get("citations", [])[:1])
+
+r2 = orc.run("Predict wildfire risk for California next 7 days")
+print(r2["task_type"], r2.get("risk_level"), r2.get("decision"), r2.get("rationale", "")[:200])
 ```
 
-### Dùng SeasFire model
+### Gắn checkpoint SeasFire
 
-```bash
-# 1. Clone seasfire-ml, train model
-git clone https://github.com/SeasFire/seasfire-ml.git
-cd seasfire-ml
-pip install -r requirements.txt
-./create_dataset.py --split=train --positive-samples-size=10000 --negative-samples-size=10000
-./train_gru.py --target-week=4 --batch-size=16 --timesteps=6 --no-include-oci-variables
-
-# 2. Cấu hình CALM
-export SEASFIRE_ML_PATH=/path/to/seasfire-ml
-# Trong configs/example.yaml: agent_config.prediction.checkpoint = runs/xxx.best_model.pt
-```
-
-```python
-import yaml
-with open("configs/example.yaml") as f:
-    cfg = yaml.safe_load(f)
-orc = CALMOrchestrator.from_llm(llm, memory, config=cfg)
-result = orc.run("Predict wildfire risk for Amazon next 14 days")
-```
-
-Khi không có checkpoint hoặc features: hệ thống dùng **heuristic** từ met_data (temperature, humidity) từ GEE/CDS.
-
-### Planning Agent
-
-```python
-from calm.agents.planning_agent import PlanningAgent
-
-agent = PlanningAgent(llm=llm, config={}, n_max=3, f_max=3)
-result = agent.invoke("Wildfire risk assessment for Amazon region next 7 days")
-plan = result["final_output"]
-for step in plan:
-    print(step["step_id"], step["action"], step["agent"], step.get("prompt"))
-```
-
-### Evaluator — LLM-as-a-Judge
-
-```python
-from calm.agents.evaluator_agent import EvaluatorAgent
-
-evaluator = EvaluatorAgent(llm=llm, config={"passing_score": 75.0})
-eval_result = evaluator.evaluate(response=orc_result, query=query)
-print(eval_result["average_score"], eval_result["passed"], eval_result["scores"])
-```
+Trong `configs/example.yaml` (hoặc `config` dict) đặt `agent_config.prediction.checkpoint` trỏ tới file `.pt` sau khi train (xem comment trong file). Nếu không có checkpoint hoặc build runner lỗi, orchestrator log rõ và prediction agent có thể dùng chế độ fallback (tùy `allow_prediction_fallback`).
 
 ---
 
-## Cấu hình
+## Cấu hình (tham chiếu `configs/example.yaml`)
 
-| Thành phần | Config key | Mô tả |
-|------------|------------|--------|
-| Planning | `agent_config.planning` | n_max, f_max |
-| Data | `agent_config.data_knowledge` | dedup_check, max_news_results |
-| Prediction | `agent_config.prediction` | checkpoint, seasfire_variables, timesteps |
-| RSEN | `agent_config.rsen` | memory_k, parallel_execution |
-| QA | `agent_config.qa` | evidence_threshold, max_search_iterations |
-| Evaluator | `agent_config.evaluator` | passing_score (default 75) |
+| Thành phần | Khóa gợi ý | Ghi chú |
+|------------|------------|---------|
+| Planning | `agent_config.planning` | `n_max`, `f_max` |
+| Data | `agent_config.data_knowledge` | GEE/CDS, dedup, giới hạn web/arXiv |
+| Prediction | `agent_config.prediction` | `checkpoint`, `timesteps`, `target_week`, … |
+| RSEN | `agent_config.rsen` | `memory_k`, v.v. |
+| QA | `agent_config.qa` | `evidence_threshold`, `max_search_iterations` |
+| Evaluator | `agent_config.evaluator` | `passing_score`, tiêu chí |
+
+`CALMOrchestrator` cũng đọc nhánh `prediction` ở top-level config nếu bạn truyền dict tương thích (xem `_resolve_prediction_config` trong code).
 
 ---
 
-## Technology Stack
+## Công nghệ
 
-| Hạng mục | Công nghệ |
-|----------|-----------|
+| Lớp | Công nghệ |
+|-----|-----------|
 | Ngôn ngữ | Python ≥ 3.10 |
-| LLM | LangChain, OpenAI, OpenRouter |
-| Vector DB | Chroma |
-| Embedding | OpenAI text-embedding-3-small / sentence-transformers all-MiniLM-L6-v2 |
-| Tools | GEE, Copernicus CDS, DuckDuckGo, ArXiv |
-| Model | SeasFire GRU (seasfire-ml), PyTorch |
+| LLM / agent | LangChain, LangGraph (tùy agent), OpenAI / OpenRouter / Ollama (tùy cài) |
+| Vector store | Chroma |
+| Spatial / climate | Earth Engine API, cdsapi |
+| Tìm kiếm | ddgs / DuckDuckGo, arXiv |
+| Model | PyTorch; tích hợp SeasFire GRU (optional) |
 
 ---
 
-## API Reference (tóm tắt)
+## API tóm tắt
 
-| Thành phần | Mô tả |
-|------------|--------|
-| `CALMOrchestrator` | `run(query)` tự route; `from_llm(llm, memory_store, tools, model_runner, config)` |
-| `PlanningAgent` | `invoke(query)` → plan JSON |
-| `RouterAgent` | `route(query, plan_steps)` → TaskRouting |
-| `ExecutionAgent` | `execute_step(step, context)` |
-| `DataKnowledgeAgent` | `retrieve(query, params)` — collect, extract, ChromaDB |
-| `PredictionReasoningAgent` | `predict(params)` — SeasFireModelRunner hoặc heuristic |
-| `WildfireQAAgent` | `invoke(query, pre_retrieved)` |
+| Thành phần | Vai trò |
+|------------|---------|
+| `CALMOrchestrator` | `run(query)`; `from_llm(...)` khởi tạo đủ agent + executor |
+| `PlanningAgent` | `invoke(query)` → plan |
+| `RouterAgent` | `route(query, plan_steps)` → `TaskRouting` |
+| `DataKnowledgeAgent` | `retrieve(query, params)` |
+| `PredictionReasoningAgent` | `predict(params)` |
+| `WildfireQAAgent` | `invoke(query, pre_retrieved=…)` |
 | `RSENModule` | `validate(prediction, met_data, spatial_data)` |
-| `EvaluatorAgent` | `evaluate(response, query)` → scores, passed |
-| `SeasFireModelRunner` | `predict(params)` — adapter cho SeasFire |
+| `EvaluatorAgent` | `evaluate(response, query)` |
 
 ---
 
 ## Phát triển
 
 ```bash
-pip install -r requirements.txt
-pytest tests/ -v
+pip install -e ".[dev]"   # pytest, ruff, mypy (xem pyproject.toml)
+ruff check src
+pytest    # khi có thư mục tests/
 ```
 
 ---
 
 ## License
 
-MIT. Chi tiết xem `LICENSE`.
+MIT (theo định hướng dự án). Khi công khai repo, nên thêm file `LICENSE` rõ ràng.

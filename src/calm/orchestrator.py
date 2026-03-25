@@ -121,6 +121,9 @@ class CALMOrchestrator:
             try:
                 routing = self.router_agent.route(normalized_query, plan_steps)
                 task_type = routing.task_type
+                if task_type == "hybrid":
+                    # Cần cả bằng chứng và mô hình: chạy pipeline prediction (retrieve → predict → RSEN).
+                    task_type = "prediction"
                 logger.info(
                     "[Orchestrator] Router: task_type=%s, confidence=%.2f",
                     task_type,
@@ -165,30 +168,23 @@ class CALMOrchestrator:
 
     def _classify_intent_fallback(self, plan_steps: List[Dict[str, Any]], query: str) -> str:
         """Fallback keyword routing khi không có RouterAgent."""
+        plan_pred = False
+        plan_qa = False
         for step in plan_steps:
             action = str(step.get("action", "")).lower()
             agent = str(step.get("agent", "")).lower()
             if any(w in action or w in agent for w in ["predict", "forecast", "model", "run_model"]):
-                return "prediction"
+                plan_pred = True
             if any(w in action or w in agent for w in ["retrieve", "web_search", "qa", "compile_report"]):
-                return "qa"
-
-        q_lower = query.lower()
-        if any(
-            w in q_lower
-            for w in [
-                "predict",
-                "forecast",
-                "risk",
-                "probability",
-                "next week",
-                "next days",
-                "fire danger",
-                "wildfire risk",
-            ]
-        ):
+                plan_qa = True
+        if plan_pred:
             return "prediction"
-        return "qa"
+        if plan_qa:
+            return "qa"
+
+        from calm.utils.intent_hints import infer_task_from_keywords
+
+        return infer_task_from_keywords(query)
 
     def _run_plan_driven(
         self,
